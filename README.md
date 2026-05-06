@@ -1,16 +1,16 @@
 # tej-bazaar
 
-> Free, open EOD data for Indian stock markets — NSE & BSE. Built from official exchange Bhavcopy. Available as Parquet (and soon via HuggingFace + REST API).
+> Free, open EOD data for Indian stock markets — NSE & BSE. Built from official exchange Bhavcopy. Published as partitioned Parquet on HuggingFace.
 
 Part of the [TejHQ](https://github.com/tejhq) ecosystem.
 
-> **Status:** NSE + BSE pipelines live end-to-end (fetch → parse → transform → partitioned parquet). HuggingFace publish and scheduled cron come next. See [ROADMAP.md](./ROADMAP.md).
+> **Status:** NSE + BSE pipelines live, publishing to [`tejhq/indian-markets`](https://huggingface.co/datasets/tejhq/indian-markets). GitHub Actions cron next. See [ROADMAP.md](./ROADMAP.md).
 
 ---
 
 ## What is this?
 
-**tej-bazaar** ingests end-of-day OHLCV data for NSE and BSE listed instruments straight from the exchanges' official Bhavcopy, normalizes it, and publishes it as partitioned Parquet.
+**tej-bazaar** ingests end-of-day OHLCV data for NSE and BSE listed instruments straight from the exchanges' official Bhavcopy, normalizes it, and publishes it as partitioned Parquet on HuggingFace.
 
 - **Source:** NSE/BSE Bhavcopy (official, free, no auth, redistributable)
 - **Format:** Polars-friendly Parquet, Hive-partitioned by date
@@ -21,12 +21,18 @@ This repo is the **ingest pipeline**. A separate `tej-api` repo will serve the d
 
 ---
 
-## Data Coverage
+## Coverage
 
-| Exchange | Status | Instruments | Updated |
-|----------|--------|-------------|---------|
-| NSE Equity (`EQ`, `BE`, `BZ`) | ✅ live (local) | ~2,300 / day | Manual today; cron next |
-| BSE Equity (`A`, `B`, `T`) | ✅ live (local) | ~2,200 / day | Manual today; cron next |
+| Exchange | Series | Instruments | Coverage start |
+|----------|--------|-------------|----------------|
+| NSE Equity | `EQ`, `BE`, `BZ` | ~2,300 / day | 2024-01-01 |
+| BSE Equity | `A`, `B`, `T` | ~2,200 / day | 2024-01-01 |
+
+### Why 2024-01-01?
+
+NSE and BSE both moved to the new **SEBI CMTS bhavcopy format** around late 2023 / early 2024. NSE's CMTS file (`BhavCopy_NSE_CM_0_0_0_{YYYYMMDD}_F_0000.csv.zip`) starts **2024-01-01** — December 2023 returns 404.
+
+Pre-cutover bhavcopies use legacy formats with different filenames and column names. Parsing them needs a separate code path; tracked under [Phase 3.5 in ROADMAP](./ROADMAP.md#phase-35--legacy-historical-data). For now we publish a clean, uniform CMTS-era dataset.
 
 ### Output schema (per row)
 
@@ -34,7 +40,7 @@ This repo is the **ingest pipeline**. A separate `tej-api` repo will serve the d
 |-------|------|-------------|
 | `date` | Date | Trading date |
 | `symbol` | Utf8 | Ticker (e.g. `RELIANCE`) |
-| `series` | Utf8 | NSE series code (`EQ`, `BE`, `BZ`, ...) |
+| `series` | Utf8 | Exchange series code (NSE: `EQ`/`BE`/`BZ`, BSE: `A`/`B`/`T`) |
 | `isin` | Utf8 | International Securities ID |
 | `name` | Utf8 | Full instrument name |
 | `open` / `high` / `low` / `close` | Float64 | OHLC |
@@ -46,120 +52,92 @@ This repo is the **ingest pipeline**. A separate `tej-api` repo will serve the d
 
 ---
 
-## Access the Data
+## Use the data
 
-### Local Parquet (today)
+### From HuggingFace (recommended)
 
-After running the pipeline (see below), files land at:
+```python
+import polars as pl
+from huggingface_hub import hf_hub_download
 
+p = hf_hub_download(
+    "tejhq/indian-markets",
+    "nse/year=2025/month=04/date=2025-04-30.parquet",
+    repo_type="dataset",
+)
+df = pl.read_parquet(p)
 ```
-data/out/nse/year=2025/month=04/date=2025-04-30.parquet
+
+Or the whole partition tree with DuckDB:
+
+```sql
+SELECT *
+FROM read_parquet('hf://datasets/tejhq/indian-markets/nse/**/*.parquet', hive_partitioning=1)
+WHERE symbol = 'RELIANCE' AND date >= '2025-01-01';
 ```
 
-Read with Polars or DuckDB:
+### From local parquet (after running the pipeline yourself)
 
 ```python
 import polars as pl
 df = pl.read_parquet("data/out/nse/year=2025/month=04/date=2025-04-30.parquet")
 ```
 
-```sql
--- DuckDB query across the whole partition tree:
-SELECT * FROM read_parquet('data/out/nse/**/*.parquet', hive_partitioning=1)
-WHERE symbol = 'RELIANCE';
-```
-
-### HuggingFace (Phase 2 — not live yet)
-
-```python
-# Once published:
-from datasets import load_dataset
-df = load_dataset("tejhq/indian-markets", split="nse")
-```
-
-### TejHQ REST API (Phase 6 — separate repo)
+### Via REST API (Phase 6 — separate `tej-api` repo, not live)
 
 ```bash
 curl https://api.tejhq.dev/v1/ohlcv?symbol=RELIANCE&from=2025-01-01&to=2025-04-30
 ```
 
-Join the waitlist at [tejhq.dev](https://tejhq.dev).
-
 ---
 
-## Pipeline
-
-```
-NSE/BSE Bhavcopy (official EOD)
-  → fetch (HTTP)
-  → parse (CSV → Polars)
-  → transform (filter, dedupe, validate)
-  → write (partitioned Parquet)
-  → [Phase 2] HuggingFace push
-```
-
-Bhavcopy is the exchanges' official end-of-day dump — free, no auth, redistributable. The pipeline skips market holidays automatically using `exchange_calendars` (NSE/BSE share trading days).
-
----
-
-## Repo Structure
-
-```
-tej-bazaar/
-├── pipeline/
-│   ├── __init__.py
-│   ├── fetch.py        # NSE bhavcopy download (zip → CSV)
-│   ├── parse.py        # CSV → normalized Polars DataFrame
-│   ├── transform.py    # filter EQ series, dedupe, validate
-│   ├── push.py         # write partitioned parquet
-│   ├── holidays.py     # NSE/BSE trading calendar
-│   └── cli.py          # typer CLI: fetch / backfill / info / version
-├── tests/
-│   ├── fixtures/       # tiny golden bhavcopy sample
-│   ├── test_holidays.py
-│   ├── test_fetch.py
-│   ├── test_parse.py
-│   ├── test_transform.py
-│   ├── test_push.py
-│   └── test_cli.py
-├── pyproject.toml
-├── ROADMAP.md
-├── LICENSE
-└── README.md
-```
-
----
-
-## Running Locally
+## Run it yourself
 
 Requires Python 3.11+.
 
 ```bash
 git clone https://github.com/tejhq/tej-bazaar
 cd tej-bazaar
-
-# Install
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
+```
 
-# Run pipeline for one date (NSE by default)
-tej-bazaar fetch 2025-04-30
-tej-bazaar fetch 2025-04-30 --exchange BSE
+### CLI commands
+
+| Command | What it does |
+|---------|--------------|
+| `tej-bazaar fetch DATE` | Run full pipeline for one trading date |
+| `tej-bazaar fetch DATE --exchange BSE` | BSE instead of default NSE |
+| `tej-bazaar fetch DATE --exchange both` | Both exchanges |
+| `tej-bazaar backfill --from D --to D` | Range; skips weekends + NSE/BSE holidays automatically |
+| `tej-bazaar backfill --from D --to D --exchange both` | Range, both exchanges |
+| `tej-bazaar publish --dry-run` | List local parquet files; no upload |
+| `tej-bazaar publish --repo tejhq/indian-markets` | Push to HuggingFace (needs `HF_TOKEN`) |
+| `tej-bazaar info` | Inventory of local parquet on disk |
+| `tej-bazaar version` | Print version |
+
+Common flags: `--out-dir PATH` (parquet output, default `data/out/`), `--raw-dir PATH` (downloaded CSV cache, default `data/raw/`), `--skip-existing/--overwrite` (backfill resume behaviour, default skip).
+
+### Quick smoke test
+
+```bash
 tej-bazaar fetch 2025-04-30 --exchange both
-
-# Backfill a range (skips holidays + weekends)
-tej-bazaar backfill --from 2025-04-01 --to 2025-04-30 --exchange both
-
-# What's on disk?
 tej-bazaar info
-
-# Run the test suite
 pytest
 ```
 
-Output lands under `data/out/` by default. Override with `--out-dir`.
+### Pipeline
 
-`HF_TOKEN` env var is only needed once Phase 2 (HuggingFace push) lands.
+```
+NSE/BSE Bhavcopy (official EOD, SEBI CMTS format)
+  → fetch (HTTP, browser headers, idempotent)
+  → parse (CSV → Polars, normalized 14-column schema)
+  → transform (filter equity series, dedupe, validate prices)
+  → write (partitioned parquet, zstd, Hive layout)
+  → publish (HuggingFace upload_folder, content-hash dedup)
+```
+
+The pipeline skips market holidays automatically using `exchange_calendars` (NSE/BSE share trading days).
 
 ---
 
@@ -169,8 +147,10 @@ See [ROADMAP.md](./ROADMAP.md) for the full plan.
 
 - [x] **Phase 1** — NSE pipeline (fetch, parse, transform, parquet write, CLI)
 - [x] **Phase 2a** — BSE pipeline (same SEBI CMTS schema; series A/B/T)
-- [ ] **Phase 2b** — HuggingFace publish, GitHub Actions cron, backfill scripts
+- [x] **Phase 2b** — HuggingFace publish (`tej-bazaar publish`)
+- [ ] **Phase 2c** — GitHub Actions cron (6:30 PM IST weekdays, holiday-aware)
 - [ ] **Phase 3** — S3/R2 mirror, retry/alerting, source-diff checks
+- [ ] **Phase 3.5** — Legacy historical data (pre-2024 NSE/BSE formats)
 - [ ] **Phase 4** — Corporate actions, adjusted close, symbol-change history
 - [ ] **Phase 5** — Derived metrics (returns, 52w hi/lo, avg vol)
 - [ ] **Phase 6** — REST API handoff to `tej-api`, Python + JS SDKs
@@ -196,7 +176,7 @@ Data: NSE/BSE Bhavcopy is published openly by the exchanges; redistribution as c
 TejHQ is building developer-first financial data infrastructure for India.
 
 - 🌐 [tejhq.dev](https://tejhq.dev)
-- 🐦 [@tejhq](https://x.com/tejhq)
+- 🤗 [HuggingFace dataset](https://huggingface.co/datasets/tejhq/indian-markets)
 - 💬 Discussions tab for questions
 
 > *Tej — sharp, fast, bright. Just like the data should be.*

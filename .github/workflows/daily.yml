@@ -1,0 +1,77 @@
+name: daily-bhavcopy
+
+on:
+  schedule:
+    # 13:30 UTC = 19:00 IST, Mon–Fri. NSE bhavcopy lands ~18:00 IST,
+    # BSE ~18:30 IST, so 19:00 IST gives a safety buffer.
+    - cron: '30 13 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Trading date YYYY-MM-DD (defaults to today UTC→IST)'
+        required: false
+        default: ''
+
+concurrency:
+  group: daily-bhavcopy
+  cancel-in-progress: false
+
+jobs:
+  fetch-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install pipeline
+        run: pip install -e .
+
+      - name: Resolve trading date (IST)
+        id: date
+        run: |
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            D="${{ github.event.inputs.date }}"
+          else
+            D=$(TZ=Asia/Kolkata date +%Y-%m-%d)
+          fi
+          echo "value=$D" >> "$GITHUB_OUTPUT"
+          echo "Trading date: $D"
+
+      - name: Fetch NSE+BSE
+        run: |
+          tej-bazaar fetch "${{ steps.date.outputs.value }}" \
+            --exchange both \
+            --out-dir data/out
+
+      - name: Publish to HF
+        if: ${{ hashFiles('data/out/**/*.parquet') != '' }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_HUB_DISABLE_XET: '1'
+        run: |
+          tej-bazaar publish \
+            --repo tejhq/indian-markets \
+            --data-dir data/out \
+            -m "daily: ${{ steps.date.outputs.value }} NSE+BSE"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Daily run — ${{ steps.date.outputs.value }}"
+            echo ""
+            files=$(find data/out -name "*.parquet" 2>/dev/null | sort)
+            if [ -n "$files" ]; then
+              echo "Parquet files written:"
+              echo '```'
+              echo "$files"
+              echo '```'
+            else
+              echo "_No parquet written — likely a holiday or bhavcopy not yet published._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -4,7 +4,7 @@
 
 Part of the [TejHQ](https://github.com/tejhq) ecosystem.
 
-> **Status:** NSE + BSE pipelines live, publishing to [`tejhq/indian-markets`](https://huggingface.co/datasets/tejhq/indian-markets). GitHub Actions cron next. See [ROADMAP.md](./ROADMAP.md).
+> **Status:** NSE + BSE pipelines live. Daily cron publishes to [`tejhq/indian-markets`](https://huggingface.co/datasets/tejhq/indian-markets) at 19:00 IST on trading days. Corporate actions / adjusted close next. See [ROADMAP.md](./ROADMAP.md).
 
 ---
 
@@ -148,8 +148,8 @@ See [ROADMAP.md](./ROADMAP.md) for the full plan.
 - [x] **Phase 1** — NSE pipeline (fetch, parse, transform, parquet write, CLI)
 - [x] **Phase 2a** — BSE pipeline (same SEBI CMTS schema; series A/B/T)
 - [x] **Phase 2b** — HuggingFace publish (`tej-bazaar publish`)
-- [ ] **Phase 2c** — GitHub Actions cron (6:30 PM IST weekdays, holiday-aware)
-- [ ] **Phase 3** — S3/R2 mirror, retry/alerting, source-diff checks
+- [x] **Phase 2c** — GitHub Actions cron (19:00 IST weekdays, holiday-aware)
+- [ ] **Phase 3** — S3/R2 mirror, failure alerts (Slack/Discord webhook)
 - [ ] **Phase 3.5** — Legacy historical data (pre-2024 NSE/BSE formats)
 - [ ] **Phase 4** — Corporate actions, adjusted close, symbol-change history
 - [ ] **Phase 5** — Derived metrics (returns, 52w hi/lo, avg vol)

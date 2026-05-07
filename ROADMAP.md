@@ -28,7 +28,7 @@
 - [x] Exchange-aware transform (NSE: EQ/BE/BZ; BSE: A/B/T)
 - [x] CLI `--exchange NSE|BSE|both` for fetch + backfill
 - [x] HuggingFace push (`tej-bazaar publish`, content-hash dedup, dry-run)
-- [ ] GitHub Actions cron (6:30 PM IST, weekdays, holiday-aware)
+- [x] GitHub Actions cron — `.github/workflows/daily.yml`, 13:30 UTC (19:00 IST), Mon–Fri, holiday-safe (skip publish if no parquet written)
 - [ ] Backfill script (one-shot historical load, both exchanges)
 - [ ] Sample data committed under `data/sample/`
 
@@ -58,11 +58,49 @@ To extend coverage backward (2010s → 2023):
 Decision deferred — start with clean CMTS-era data, expand backward once steady-state
 publishing works.
 
-## Phase 4 — Corporate actions & adjustments
+## Phase 4 — Corporate actions & adjustments (ACTIVE)
 
-- [ ] Splits, bonuses, dividends feed (NSE corporate actions endpoint)
-- [ ] Adjusted-close column, separate from raw close
-- [ ] Symbol change history (renames, mergers, delistings)
+Bhavcopy publishes **unadjusted** prices. A 1:1 split looks like a -50% crash; a
+₹5 dividend on a ₹100 stock looks like a -5% drop. Useless for backtests, returns,
+charts, ML features. This phase adds adjusted prices alongside raw.
+
+### 4a — Corporate actions ingestion
+
+- [ ] Fetch NSE corporate actions feed (`/api/corporates-corporateActions` or archive CSV)
+- [ ] Fetch BSE corporate actions feed
+- [ ] Normalize into single `actions` table:
+  `symbol | isin | ex_date | type | ratio | cash_amount | record_date | raw`
+  where `type ∈ {split, bonus, dividend, rights, merger, demerger, rename}`
+- [ ] Idempotent fetcher + Hive-partitioned parquet under `actions/<exchange>/year=YYYY/...`
+- [ ] Tests: fixture-driven parser per action type
+
+### 4b — Adjustment factor computation
+
+- [ ] Per (symbol, ex_date) compute multiplicative factor:
+  - Split N:1 → factor = 1/N
+  - Bonus N:M → factor = M/(N+M)
+  - Dividend D on close C → factor = (C - D) / C
+- [ ] Apply factors **backward** from latest date (cumulative product)
+- [ ] Generate `prices_adjusted/` parquet alongside raw `prices/`:
+  same schema, OHLC + volume back-adjusted
+
+### 4c — Symbol continuity
+
+- [ ] Build `symbol_history` table — ISIN as primary key, list of `(symbol, valid_from, valid_to)` ranges
+- [ ] Handle: pure rename (TATAMOTORS → TATAMOTORS-DVR collapse), merger absorption, demerger split
+- [ ] Helper API: `resolve_symbol(isin, on_date) -> symbol` and reverse
+
+### 4d — Reconciliation
+
+- [ ] Cross-check our adjusted close against Yahoo Finance for top 200 names, last 5 years
+- [ ] Tolerance: <0.5% diff on >99% of (symbol, date) pairs
+- [ ] Publish reconciliation report as part of CI
+
+### Open questions for Phase 4
+
+- NSE corporate actions API requires the same browser-header dance as bhavcopy — need to confirm endpoint stability
+- Some actions (mergers) have no clean numeric ratio; need manual override table
+- Decide: ship adjusted as separate parquet tree or extra columns in same file
 
 ## Phase 5 — Derived metrics
 

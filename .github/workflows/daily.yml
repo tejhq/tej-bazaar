@@ -63,6 +63,18 @@ jobs:
             --cache-dir data/raw/actions \
             --out-dir data/out/actions
 
+      - name: Compute adjusted prices (YTD)
+        # Joins bhavcopy + actions for current year into back-adjusted prices.
+        # Runs only when both inputs exist for the year.
+        continue-on-error: true
+        run: |
+          tej-bazaar actions adjust \
+            --year "${{ steps.year.outputs.value }}" \
+            --exchange both \
+            --prices-dir data/out \
+            --actions-dir data/out/actions \
+            --out-dir data/out/prices_adjusted
+
       - name: Publish to HF
         if: ${{ hashFiles('data/out/**/*.parquet') != '' }}
         env:
@@ -72,7 +84,7 @@ jobs:
           tej-bazaar publish \
             --repo tejhq/indian-markets \
             --data-dir data/out \
-            -m "daily: ${{ steps.date.outputs.value }} NSE+BSE + actions YTD"
+            -m "daily: ${{ steps.date.outputs.value }} NSE+BSE + actions YTD + adjusted"
 
       - name: Summary
         if: always()

@@ -15,6 +15,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Annotated
 
+import polars as pl
 import typer
 from rich.console import Console
 from rich.panel import Panel
@@ -31,6 +32,8 @@ from rich.text import Text
 from pipeline import __version__, holidays
 from pipeline.actions import (
     ActionsFetchError,
+    back_adjust,
+    compute_action_factors,
     fetch_bse_actions,
     fetch_nse_actions,
     load_bse_scrip_to_isin,
@@ -52,6 +55,7 @@ DEFAULT_RAW_DIR = Path("data/raw")
 DEFAULT_OUT_DIR = Path("data/out")
 DEFAULT_ACTIONS_CACHE_DIR = Path("data/raw/actions")
 DEFAULT_ACTIONS_OUT_DIR = Path("data/out/actions")
+DEFAULT_PRICES_ADJUSTED_DIR = Path("data/out/prices_adjusted")
 
 
 class ExchangeChoice(str, Enum):
@@ -437,6 +441,68 @@ def actions_fetch(
         df.write_parquet(out_path)
         summary.add_row(ex, str(len(raw)), str(df.height),
                         f"{with_isin}/{df.height}", str(out_path))
+
+    console.print(summary)
+
+
+@actions_app.command("adjust")
+def actions_adjust(
+    year: Annotated[int, typer.Option("--year", help="Calendar year to adjust")],
+    exchange: Annotated[
+        ExchangeChoice,
+        typer.Option("--exchange", "-e", help="Exchange to adjust", case_sensitive=False),
+    ] = ExchangeChoice.BOTH,
+    prices_dir: Annotated[
+        Path,
+        typer.Option("--prices-dir", help="Root of partitioned bhavcopy parquet"),
+    ] = DEFAULT_OUT_DIR,
+    actions_dir: Annotated[
+        Path,
+        typer.Option("--actions-dir", help="Directory containing actions parquet"),
+    ] = DEFAULT_ACTIONS_OUT_DIR,
+    out_dir: Annotated[
+        Path,
+        typer.Option("--out-dir", help="Directory for adjusted prices parquet"),
+    ] = DEFAULT_PRICES_ADJUSTED_DIR,
+) -> None:
+    """Compute back-adjusted prices using corporate actions.
+
+    Reads bhavcopy parquet under `<prices-dir>/<ex>/year=<year>/**` and the
+    actions parquet at `<actions-dir>/<ex>_<year>.parquet`. Writes adjusted
+    prices to `<out-dir>/<ex>_<year>.parquet`.
+    """
+    _banner()
+    exchanges = _exchanges(exchange)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    summary = Table(title="actions adjust", border_style="cyan")
+    summary.add_column("Exchange", style="bold")
+    summary.add_column("Price rows", justify="right")
+    summary.add_column("Actions", justify="right")
+    summary.add_column("Adjusted rows", justify="right", style="green")
+    summary.add_column("Output", style="dim")
+
+    for ex in exchanges:
+        prices_glob = list((prices_dir / ex.lower()).rglob(f"year={year}/**/*.parquet"))
+        if not prices_glob:
+            console.print(f"[yellow]skip[/yellow] {ex}: no bhavcopy parquet under "
+                          f"{prices_dir / ex.lower()}/year={year}")
+            continue
+
+        prices = pl.concat([pl.read_parquet(p) for p in prices_glob])
+
+        actions_path = actions_dir / f"{ex.lower()}_{year}.parquet"
+        if not actions_path.exists():
+            console.print(f"[yellow]skip[/yellow] {ex}: actions parquet missing at {actions_path}")
+            continue
+        actions = pl.read_parquet(actions_path)
+
+        factors = compute_action_factors(actions, prices)
+        adjusted = back_adjust(prices, factors)
+        out_path = out_dir / f"{ex.lower()}_{year}.parquet"
+        adjusted.write_parquet(out_path)
+        summary.add_row(ex, str(prices.height), str(actions.height),
+                        str(adjusted.height), str(out_path))
 
     console.print(summary)
 

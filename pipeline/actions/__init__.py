@@ -5,6 +5,11 @@ corporate-action feeds and normalizes them so a downstream adjustment layer
 can build back-adjusted prices.
 """
 
+from pipeline.actions.back_adjust import (
+    back_adjust,
+    compute_action_factors,
+)
+from pipeline.actions.factors import compute_factor, needs_prev_close
 from pipeline.actions.fetch import (
     ActionsFetchError,
     fetch_actions,
@@ -33,12 +38,16 @@ __all__ = [
     "ACTION_TYPES",
     "ActionsFetchError",
     "CorporateAction",
+    "back_adjust",
     "build_scrip_to_isin",
+    "compute_action_factors",
+    "compute_factor",
     "fetch_actions",
     "fetch_bse_actions",
     "fetch_bse_scrip_master",
     "fetch_nse_actions",
     "load_bse_scrip_to_isin",
+    "needs_prev_close",
     "parse_actions",
     "parse_bse_record",
     "parse_nse_record",

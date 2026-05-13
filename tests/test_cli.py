@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import polars as pl
+import pytest
 from typer.testing import CliRunner
 
 from pipeline import __version__
@@ -266,3 +267,105 @@ def test_actions_fetch_scrip_map_failure_warns_but_continues(tmp_path: Path):
     bse_df = pl.read_parquet(out / "bse_20240101_20240131.parquet")
     # ISIN stays null when map lookup fails
     assert bse_df["isin"][0] is None
+
+
+# --- actions adjust ----------------------------------------------------
+
+
+def _write_prices_parquet(root: Path, exchange: str, year: int, rows: list[tuple]) -> None:
+    """Write rows under partitioned layout: <exchange>/year=YYYY/month=MM/date=...parquet."""
+    schema = {"isin": pl.Utf8, "date": pl.Date, "symbol": pl.Utf8, "close": pl.Float64}
+    df = pl.DataFrame(rows, schema=schema, orient="row")
+    for d, group in df.group_by("date"):
+        d = d[0]
+        path = (root / exchange.lower()
+                / f"year={d.year}" / f"month={d.month:02d}"
+                / f"date={d.isoformat()}.parquet")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        group.write_parquet(path)
+
+
+def _write_actions_parquet(actions_dir: Path, exchange: str, year: int,
+                           ex_dates: list[date], factors_meta: list[dict]) -> None:
+    """Write a minimal actions parquet matching ACTION_SCHEMA."""
+    from pipeline.actions import to_polars, CorporateAction
+    objs = [
+        CorporateAction(
+            exchange=exchange, symbol="X", isin=m.get("isin", "INE001"),
+            company="X", ex_date=ex, record_date=None, type=m["type"],
+            ratio_num=m.get("ratio_num"), ratio_den=m.get("ratio_den"),
+            cash_amount=m.get("cash_amount"),
+            face_value_from=m.get("fv_from"), face_value_to=m.get("fv_to"),
+        )
+        for ex, m in zip(ex_dates, factors_meta)
+    ]
+    actions_dir.mkdir(parents=True, exist_ok=True)
+    to_polars(objs).write_parquet(actions_dir / f"{exchange.lower()}_{year}.parquet")
+
+
+def test_actions_adjust_writes_adjusted_parquet(tmp_path: Path):
+    prices_dir = tmp_path / "out"
+    actions_dir = tmp_path / "actions"
+    out_dir = tmp_path / "adjusted"
+
+    _write_prices_parquet(prices_dir, "NSE", 2024, [
+        ("INE001", date(2024, 1, 1), "X", 1000.0),
+        ("INE001", date(2024, 6, 1), "X", 100.0),  # ex_date
+        ("INE001", date(2024, 7, 1), "X", 110.0),
+    ])
+    _write_actions_parquet(
+        actions_dir, "NSE", 2024,
+        [date(2024, 6, 1)],
+        [{"type": "split", "fv_from": 10.0, "fv_to": 1.0}],
+    )
+
+    result = runner.invoke(
+        app,
+        ["actions", "adjust",
+         "--year", "2024",
+         "--exchange", "NSE",
+         "--prices-dir", str(prices_dir),
+         "--actions-dir", str(actions_dir),
+         "--out-dir", str(out_dir)],
+    )
+    assert result.exit_code == 0, result.stdout
+    out_path = out_dir / "nse_2024.parquet"
+    assert out_path.exists()
+
+    adjusted = pl.read_parquet(out_path).sort("date")
+    assert adjusted["adj_factor_cumulative"].to_list() == pytest.approx([0.1, 1.0, 1.0])
+    assert adjusted["adj_close"].to_list() == pytest.approx([100.0, 100.0, 110.0])
+
+
+def test_actions_adjust_skips_missing_year(tmp_path: Path):
+    # No prices written for 2024; should skip cleanly
+    result = runner.invoke(
+        app,
+        ["actions", "adjust",
+         "--year", "2024",
+         "--exchange", "NSE",
+         "--prices-dir", str(tmp_path / "out"),
+         "--actions-dir", str(tmp_path / "actions"),
+         "--out-dir", str(tmp_path / "adjusted")],
+    )
+    assert result.exit_code == 0
+    assert "no bhavcopy" in result.stdout
+
+
+def test_actions_adjust_skips_missing_actions(tmp_path: Path):
+    prices_dir = tmp_path / "out"
+    _write_prices_parquet(prices_dir, "NSE", 2024, [
+        ("INE001", date(2024, 1, 1), "X", 100.0),
+    ])
+    # No actions parquet
+    result = runner.invoke(
+        app,
+        ["actions", "adjust",
+         "--year", "2024",
+         "--exchange", "NSE",
+         "--prices-dir", str(prices_dir),
+         "--actions-dir", str(tmp_path / "actions"),
+         "--out-dir", str(tmp_path / "adjusted")],
+    )
+    assert result.exit_code == 0
+    assert "actions parquet missing" in result.stdout

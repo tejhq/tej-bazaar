@@ -191,6 +191,57 @@ def test_help_lists_actions_group():
     assert "actions" in result.stdout
 
 
+def test_actions_fetch_year_flag(tmp_path: Path):
+    raw = [
+        {"symbol": "X", "series": "EQ", "subject": "Bonus 1:1",
+         "exDate": "01-Feb-2024", "recDate": "01-Feb-2024",
+         "comp": "X Ltd", "isin": "INE000A00001"},
+    ]
+    out = tmp_path / "out"
+    with patch("pipeline.cli.fetch_nse_actions", return_value=raw) as mn:
+        result = runner.invoke(
+            app,
+            ["actions", "fetch",
+             "--year", "2024",
+             "--exchange", "NSE",
+             "--cache-dir", str(tmp_path / "cache"),
+             "--out-dir", str(out)],
+        )
+    assert result.exit_code == 0, result.stdout
+    # Stable annual file name
+    assert (out / "nse_2024.parquet").exists()
+    # Range passed to fetcher covers full year
+    args, _ = mn.call_args
+    assert args[0] == date(2024, 1, 1)
+    assert args[1] == date(2024, 12, 31)
+
+
+def test_actions_fetch_year_conflicts_with_range(tmp_path: Path):
+    result = runner.invoke(
+        app,
+        ["actions", "fetch",
+         "--year", "2024",
+         "--from", "2024-01-01",
+         "--to", "2024-06-30",
+         "--exchange", "NSE",
+         "--cache-dir", str(tmp_path / "cache"),
+         "--out-dir", str(tmp_path / "out")],
+    )
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.stdout or "mutually exclusive" in (result.stderr or "")
+
+
+def test_actions_fetch_missing_range_rejected(tmp_path: Path):
+    result = runner.invoke(
+        app,
+        ["actions", "fetch",
+         "--exchange", "NSE",
+         "--cache-dir", str(tmp_path / "cache"),
+         "--out-dir", str(tmp_path / "out")],
+    )
+    assert result.exit_code != 0
+
+
 def test_actions_fetch_scrip_map_failure_warns_but_continues(tmp_path: Path):
     from pipeline.actions import ActionsFetchError
 

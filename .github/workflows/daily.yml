@@ -48,6 +48,21 @@ jobs:
             --exchange both \
             --out-dir data/out
 
+      - name: Resolve current year (IST)
+        id: year
+        run: echo "value=$(TZ=Asia/Kolkata date +%Y)" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch corporate actions (YTD)
+        # YTD rolling refresh: overwrites annual <exchange>_<year>.parquet so
+        # the published file stays a single per-year artifact.
+        continue-on-error: true
+        run: |
+          tej-bazaar actions fetch \
+            --year "${{ steps.year.outputs.value }}" \
+            --exchange both \
+            --cache-dir data/raw/actions \
+            --out-dir data/out/actions
+
       - name: Publish to HF
         if: ${{ hashFiles('data/out/**/*.parquet') != '' }}
         env:
@@ -57,7 +72,7 @@ jobs:
           tej-bazaar publish \
             --repo tejhq/indian-markets \
             --data-dir data/out \
-            -m "daily: ${{ steps.date.outputs.value }} NSE+BSE"
+            -m "daily: ${{ steps.date.outputs.value }} NSE+BSE + actions YTD"
 
       - name: Summary
         if: always()

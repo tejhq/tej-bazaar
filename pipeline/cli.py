@@ -351,8 +351,22 @@ app.add_typer(actions_app)
 
 @actions_app.command("fetch")
 def actions_fetch(
-    from_date: Annotated[str, typer.Option("--from", help="Start date YYYY-MM-DD")],
-    to_date: Annotated[str, typer.Option("--to", help="End date YYYY-MM-DD (inclusive)")],
+    from_date: Annotated[
+        str | None,
+        typer.Option("--from", help="Start date YYYY-MM-DD (or use --year)"),
+    ] = None,
+    to_date: Annotated[
+        str | None,
+        typer.Option("--to", help="End date YYYY-MM-DD inclusive (or use --year)"),
+    ] = None,
+    year: Annotated[
+        int | None,
+        typer.Option(
+            "--year",
+            help="Fetch full calendar year (Jan 1 to Dec 31). "
+            "Writes annual parquet `<exchange>_<year>.parquet` for stable cron output.",
+        ),
+    ] = None,
     exchange: Annotated[
         ExchangeChoice,
         typer.Option("--exchange", "-e", help="Exchange to fetch", case_sensitive=False),
@@ -373,8 +387,18 @@ def actions_fetch(
 ) -> None:
     """Fetch corporate actions for a date range and write normalized parquet."""
     _banner()
-    start = _parse_date(from_date)
-    end = _parse_date(to_date)
+    if year is not None:
+        if from_date or to_date:
+            raise typer.BadParameter("--year is mutually exclusive with --from/--to")
+        start = date(year, 1, 1)
+        end = date(year, 12, 31)
+        stem_for = lambda ex: f"{ex.lower()}_{year}"  # noqa: E731
+    else:
+        if not from_date or not to_date:
+            raise typer.BadParameter("provide --from and --to (or --year)")
+        start = _parse_date(from_date)
+        end = _parse_date(to_date)
+        stem_for = lambda ex: f"{ex.lower()}_{start:%Y%m%d}_{end:%Y%m%d}"  # noqa: E731
     if end < start:
         raise typer.BadParameter("--to must be on or after --from")
 
@@ -409,7 +433,7 @@ def actions_fetch(
         actions = parse_actions(raw, ex, scrip_to_isin=bse_scrip_map if ex == "BSE" else None)
         df = actions_to_polars(actions)
         with_isin = sum(1 for a in actions if a.isin)
-        out_path = out_dir / f"{ex.lower()}_{start:%Y%m%d}_{end:%Y%m%d}.parquet"
+        out_path = out_dir / f"{stem_for(ex)}.parquet"
         df.write_parquet(out_path)
         summary.add_row(ex, str(len(raw)), str(df.height),
                         f"{with_isin}/{df.height}", str(out_path))

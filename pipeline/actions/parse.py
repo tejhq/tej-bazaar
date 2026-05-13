@@ -60,7 +60,14 @@ def _parse_date(s: str | None) -> date | None:
 def _classify(text: str) -> ActionType:
     """Map free-text to ActionType. Order matters: price-impacting wins over AGM."""
     t = text.lower()
-    if "split" in t or "sub-division" in t or "subdivision" in t:
+    # "Consolidation of Shares" is a reverse split; same type, inverted face values.
+    if (
+        "split" in t
+        or "sub-division" in t
+        or "subdivision" in t
+        or "consolidation of shares" in t
+        or "share consolidation" in t
+    ):
         return "split"
     if re.search(r"\bbonus\b", t):
         return "bonus"

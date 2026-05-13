@@ -32,6 +32,15 @@ def _load_bse() -> list[dict]:
 def test_classify_split():
     assert _classify("Face Value Split (Sub-Division) - From Rs10/-") == "split"
     assert _classify("Stock  Split From Rs.10/- to Rs.1/-") == "split"
+    # Reverse split: BSE uses "Consolidation of Shares". Same type, downstream
+    # uses face_value direction to derive factor.
+    assert _classify("Consolidation of Shares") == "split"
+    assert _classify("Share Consolidation") == "split"
+
+
+def test_classify_resolution_plan_stays_other():
+    # Corporate insolvency / suspension: no price impact, not a price action.
+    assert _classify("Resolution Plan -Suspension") == "other"
 
 
 def test_classify_bonus():

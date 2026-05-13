@@ -133,8 +133,16 @@ def parse_nse_record(rec: dict[str, Any]) -> CorporateAction | None:
     )
 
 
-def parse_bse_record(rec: dict[str, Any]) -> CorporateAction | None:
-    """Parse one BSE corporate-action JSON record."""
+def parse_bse_record(
+    rec: dict[str, Any],
+    scrip_to_isin: dict[str, str] | None = None,
+) -> CorporateAction | None:
+    """Parse one BSE corporate-action JSON record.
+
+    BSE's corp-action feed lacks ISIN. When `scrip_to_isin` is supplied
+    (built from the BSE active-equities master), ISIN is joined via
+    `rec["scrip_code"]`. Without the map, isin stays None.
+    """
     purpose = (rec.get("Purpose") or "").strip()
     ex = _parse_date(rec.get("exdate")) or _parse_date(rec.get("Ex_date"))
     if ex is None:
@@ -143,10 +151,16 @@ def parse_bse_record(rec: dict[str, Any]) -> CorporateAction | None:
     action_type = _classify(purpose)
     rn, rd, cash, fv_from, fv_to = _extract_details(action_type, purpose)
 
+    isin: str | None = None
+    if scrip_to_isin is not None:
+        sc = rec.get("scrip_code")
+        if sc is not None:
+            isin = scrip_to_isin.get(str(sc).strip())
+
     return CorporateAction(
         exchange="BSE",
         symbol=(rec.get("short_name") or "").strip(),
-        isin=None,  # BSE feed lacks ISIN; joined via scrip-to-ISIN map elsewhere
+        isin=isin,
         company=(rec.get("long_name") or "").strip(),
         ex_date=ex,
         record_date=_parse_date(rec.get("RD_Date")),
@@ -160,6 +174,14 @@ def parse_bse_record(rec: dict[str, Any]) -> CorporateAction | None:
     )
 
 
-def parse_actions(records: list[dict[str, Any]], exchange: str) -> list[CorporateAction]:
-    fn = parse_nse_record if exchange.upper() == "NSE" else parse_bse_record
-    return [a for a in (fn(r) for r in records) if a is not None]
+def parse_actions(
+    records: list[dict[str, Any]],
+    exchange: str,
+    scrip_to_isin: dict[str, str] | None = None,
+) -> list[CorporateAction]:
+    if exchange.upper() == "NSE":
+        return [a for a in (parse_nse_record(r) for r in records) if a is not None]
+    return [
+        a for a in (parse_bse_record(r, scrip_to_isin) for r in records)
+        if a is not None
+    ]

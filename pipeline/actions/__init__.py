@@ -22,15 +22,23 @@ from pipeline.actions.schema import (
     CorporateAction,
     to_polars,
 )
+from pipeline.actions.scrip_map import (
+    build_scrip_to_isin,
+    fetch_bse_scrip_master,
+    load_bse_scrip_to_isin,
+)
 
 __all__ = [
     "ACTION_SCHEMA",
     "ACTION_TYPES",
     "ActionsFetchError",
     "CorporateAction",
+    "build_scrip_to_isin",
     "fetch_actions",
     "fetch_bse_actions",
+    "fetch_bse_scrip_master",
     "fetch_nse_actions",
+    "load_bse_scrip_to_isin",
     "parse_actions",
     "parse_bse_record",
     "parse_nse_record",

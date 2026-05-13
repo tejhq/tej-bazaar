@@ -113,7 +113,9 @@ def test_actions_fetch_writes_parquet(tmp_path: Path):
     out = tmp_path / "out"
 
     with patch("pipeline.cli.fetch_nse_actions", return_value=nse_raw) as mn, \
-         patch("pipeline.cli.fetch_bse_actions", return_value=bse_raw) as mb:
+         patch("pipeline.cli.fetch_bse_actions", return_value=bse_raw) as mb, \
+         patch("pipeline.cli.load_bse_scrip_to_isin",
+               return_value={"532281": "INE860A01027"}) as mm:
         result = runner.invoke(
             app,
             ["actions", "fetch",
@@ -126,6 +128,7 @@ def test_actions_fetch_writes_parquet(tmp_path: Path):
     assert result.exit_code == 0, result.stdout
     mn.assert_called_once()
     mb.assert_called_once()
+    mm.assert_called_once()
 
     nse_path = out / "nse_20240101_20240131.parquet"
     bse_path = out / "bse_20240101_20240131.parquet"
@@ -138,6 +141,9 @@ def test_actions_fetch_writes_parquet(tmp_path: Path):
     assert df["type"][0] == "dividend"
     assert df["cash_amount"][0] == 12.0
     assert df["exchange"][0] == "NSE"
+
+    bse_df = pl.read_parquet(bse_path)
+    assert bse_df["isin"][0] == "INE860A01027"
 
 
 def test_actions_fetch_single_exchange(tmp_path: Path):
@@ -183,3 +189,29 @@ def test_help_lists_actions_group():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
     assert "actions" in result.stdout
+
+
+def test_actions_fetch_scrip_map_failure_warns_but_continues(tmp_path: Path):
+    from pipeline.actions import ActionsFetchError
+
+    bse_raw = [
+        {"scrip_code": 532281, "short_name": "HCLTECH",
+         "Ex_date": "19 Jan 2024", "exdate": "20240119",
+         "Purpose": "Bonus 1:1"},
+    ]
+    out = tmp_path / "out"
+    with patch("pipeline.cli.fetch_bse_actions", return_value=bse_raw), \
+         patch("pipeline.cli.load_bse_scrip_to_isin",
+               side_effect=ActionsFetchError("scrip master down")):
+        result = runner.invoke(
+            app,
+            ["actions", "fetch",
+             "--from", "2024-01-01", "--to", "2024-01-31",
+             "--exchange", "BSE",
+             "--cache-dir", str(tmp_path / "cache"),
+             "--out-dir", str(out)],
+        )
+    assert result.exit_code == 0, result.stdout
+    bse_df = pl.read_parquet(out / "bse_20240101_20240131.parquet")
+    # ISIN stays null when map lookup fails
+    assert bse_df["isin"][0] is None

@@ -1,9 +1,10 @@
-"""tej-bazaar CLI — fetch, transform, write NSE/BSE bhavcopy as parquet.
+"""tej-bazaar CLI: fetch, transform, write NSE/BSE bhavcopy as parquet.
 
 Commands:
     tej-bazaar fetch DATE [--exchange NSE|BSE|both]
     tej-bazaar backfill --from D --to D [--exchange NSE|BSE|both]
     tej-bazaar info [--data-dir PATH]
+    tej-bazaar actions fetch --from D --to D [--exchange NSE|BSE|both]
     tej-bazaar version
 """
 
@@ -28,6 +29,14 @@ from rich.table import Table
 from rich.text import Text
 
 from pipeline import __version__, holidays
+from pipeline.actions import (
+    ActionsFetchError,
+    fetch_bse_actions,
+    fetch_nse_actions,
+    load_bse_scrip_to_isin,
+    parse_actions,
+    to_polars as actions_to_polars,
+)
 from pipeline.fetch import (
     BhavcopyFetchError,
     BhavcopyNotFoundError,
@@ -41,6 +50,8 @@ from pipeline.transform import transform
 
 DEFAULT_RAW_DIR = Path("data/raw")
 DEFAULT_OUT_DIR = Path("data/out")
+DEFAULT_ACTIONS_CACHE_DIR = Path("data/raw/actions")
+DEFAULT_ACTIONS_OUT_DIR = Path("data/out/actions")
 
 
 class ExchangeChoice(str, Enum):
@@ -328,6 +339,82 @@ def publish(
     elif result.commit_url:
         body += f"\n[dim]commit: {result.commit_url}[/dim]"
     console.print(Panel.fit(body, border_style="green" if not dry_run else "yellow"))
+
+
+actions_app = typer.Typer(
+    name="actions",
+    help="Corporate-action ingestion (dividends, splits, bonus, rights, ...).",
+    no_args_is_help=True,
+)
+app.add_typer(actions_app)
+
+
+@actions_app.command("fetch")
+def actions_fetch(
+    from_date: Annotated[str, typer.Option("--from", help="Start date YYYY-MM-DD")],
+    to_date: Annotated[str, typer.Option("--to", help="End date YYYY-MM-DD (inclusive)")],
+    exchange: Annotated[
+        ExchangeChoice,
+        typer.Option("--exchange", "-e", help="Exchange to fetch", case_sensitive=False),
+    ] = ExchangeChoice.BOTH,
+    cache_dir: Annotated[
+        Path, typer.Option("--cache-dir", help="Directory for raw JSON cache")
+    ] = DEFAULT_ACTIONS_CACHE_DIR,
+    out_dir: Annotated[
+        Path, typer.Option("--out-dir", help="Directory for normalized parquet output")
+    ] = DEFAULT_ACTIONS_OUT_DIR,
+    refresh_scrip_map: Annotated[
+        bool,
+        typer.Option(
+            "--refresh-scrip-map",
+            help="Re-pull BSE scrip-to-ISIN master (otherwise uses cached copy)",
+        ),
+    ] = False,
+) -> None:
+    """Fetch corporate actions for a date range and write normalized parquet."""
+    _banner()
+    start = _parse_date(from_date)
+    end = _parse_date(to_date)
+    if end < start:
+        raise typer.BadParameter("--to must be on or after --from")
+
+    exchanges = _exchanges(exchange)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    bse_scrip_map: dict[str, str] | None = None
+    if "BSE" in exchanges:
+        try:
+            bse_scrip_map = load_bse_scrip_to_isin(cache_dir, refresh=refresh_scrip_map)
+        except ActionsFetchError as e:
+            console.print(f"[yellow]warn[/yellow] BSE scrip map unavailable, ISIN will be null: {e}")
+            bse_scrip_map = None
+
+    summary = Table(title="actions fetch", border_style="cyan")
+    summary.add_column("Exchange", style="bold")
+    summary.add_column("Raw rows", justify="right")
+    summary.add_column("Parsed", justify="right", style="green")
+    summary.add_column("ISIN match", justify="right")
+    summary.add_column("Output", style="dim")
+
+    for ex in exchanges:
+        try:
+            if ex == "NSE":
+                raw = fetch_nse_actions(start, end, cache_dir)
+            else:
+                raw = fetch_bse_actions(start, end, cache_dir)
+        except ActionsFetchError as e:
+            console.print(f"[red]error[/red] {ex}: {e}")
+            raise typer.Exit(code=1) from e
+
+        actions = parse_actions(raw, ex, scrip_to_isin=bse_scrip_map if ex == "BSE" else None)
+        df = actions_to_polars(actions)
+        with_isin = sum(1 for a in actions if a.isin)
+        out_path = out_dir / f"{ex.lower()}_{start:%Y%m%d}_{end:%Y%m%d}.parquet"
+        df.write_parquet(out_path)
+        summary.add_row(ex, str(len(raw)), str(df.height),
+                        f"{with_isin}/{df.height}", str(out_path))
+
+    console.print(summary)
 
 
 @app.command()

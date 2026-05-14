@@ -5,6 +5,8 @@ Commands:
     tej-bazaar backfill --from D --to D [--exchange NSE|BSE|both]
     tej-bazaar info [--data-dir PATH]
     tej-bazaar actions fetch --from D --to D [--exchange NSE|BSE|both]
+    tej-bazaar actions adjust --year YYYY [--exchange NSE|BSE|both]
+    tej-bazaar symbol-history build [--exchange NSE|BSE|both]
     tej-bazaar version
 """
 
@@ -49,6 +51,7 @@ from pipeline.fetch import (
 from pipeline.parse import parse_bhavcopy
 from pipeline.publish import DEFAULT_REPO_ID, PublishError, publish_to_hf
 from pipeline.push import partition_path, write_partitioned
+from pipeline.symbol_history import build_symbol_history
 from pipeline.transform import transform
 
 DEFAULT_RAW_DIR = Path("data/raw")
@@ -56,6 +59,7 @@ DEFAULT_OUT_DIR = Path("data/out")
 DEFAULT_ACTIONS_CACHE_DIR = Path("data/raw/actions")
 DEFAULT_ACTIONS_OUT_DIR = Path("data/out/actions")
 DEFAULT_PRICES_ADJUSTED_DIR = Path("data/out/prices_adjusted")
+DEFAULT_SYMBOL_HISTORY_DIR = Path("data/out/symbol_history")
 
 
 class ExchangeChoice(str, Enum):
@@ -503,6 +507,62 @@ def actions_adjust(
         adjusted.write_parquet(out_path)
         summary.add_row(ex, str(prices.height), str(actions.height),
                         str(adjusted.height), str(out_path))
+
+    console.print(summary)
+
+
+symbol_history_app = typer.Typer(
+    name="symbol-history",
+    help="Build per-ISIN symbol-history intervals from bhavcopy series.",
+    no_args_is_help=True,
+)
+app.add_typer(symbol_history_app)
+
+
+@symbol_history_app.command("build")
+def symbol_history_build(
+    exchange: Annotated[
+        ExchangeChoice,
+        typer.Option("--exchange", "-e", help="Exchange to build", case_sensitive=False),
+    ] = ExchangeChoice.BOTH,
+    prices_dir: Annotated[
+        Path,
+        typer.Option("--prices-dir", help="Root of partitioned bhavcopy parquet"),
+    ] = DEFAULT_OUT_DIR,
+    out_dir: Annotated[
+        Path,
+        typer.Option("--out-dir", help="Directory for symbol-history parquet"),
+    ] = DEFAULT_SYMBOL_HISTORY_DIR,
+) -> None:
+    """Scan all bhavcopy years for an exchange, emit symbol-history parquet.
+
+    Output is a single file per exchange (`<out-dir>/<ex>.parquet`) covering
+    the full price history on disk: one row per (isin, contiguous symbol run).
+    """
+    _banner()
+    exchanges = _exchanges(exchange)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    summary = Table(title="symbol-history build", border_style="cyan")
+    summary.add_column("Exchange", style="bold")
+    summary.add_column("Price files", justify="right")
+    summary.add_column("Price rows", justify="right")
+    summary.add_column("Intervals", justify="right", style="green")
+    summary.add_column("Output", style="dim")
+
+    for ex in exchanges:
+        files = sorted((prices_dir / ex.lower()).rglob("*.parquet"))
+        if not files:
+            console.print(f"[yellow]skip[/yellow] {ex}: no bhavcopy parquet under "
+                          f"{prices_dir / ex.lower()}")
+            continue
+
+        prices = pl.concat([pl.read_parquet(p) for p in files])
+        history = build_symbol_history(prices, ex)
+        out_path = out_dir / f"{ex.lower()}.parquet"
+        history.write_parquet(out_path)
+        summary.add_row(ex, str(len(files)), str(prices.height),
+                        str(history.height), str(out_path))
 
     console.print(summary)
 

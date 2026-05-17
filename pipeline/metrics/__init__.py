@@ -7,5 +7,6 @@ turnover drive activity metrics).
 """
 
 from pipeline.metrics.returns import RETURNS_SCHEMA, compute_returns
+from pipeline.metrics.rolling import ROLLING_SCHEMA, compute_rolling
 
-__all__ = ["RETURNS_SCHEMA", "compute_returns"]
+__all__ = ["RETURNS_SCHEMA", "ROLLING_SCHEMA", "compute_returns", "compute_rolling"]

@@ -8,6 +8,7 @@ can build back-adjusted prices.
 from pipeline.actions.back_adjust import (
     back_adjust,
     compute_action_factors,
+    resolve_isin_via_symbol_history,
 )
 from pipeline.actions.factors import compute_factor, needs_prev_close
 from pipeline.actions.fetch import (
@@ -51,5 +52,6 @@ __all__ = [
     "parse_actions",
     "parse_bse_record",
     "parse_nse_record",
+    "resolve_isin_via_symbol_history",
     "to_polars",
 ]

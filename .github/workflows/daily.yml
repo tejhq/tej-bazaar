@@ -63,9 +63,22 @@ jobs:
             --cache-dir data/raw/actions \
             --out-dir data/out/actions
 
+      - name: Build symbol history
+        # Walks all bhavcopy years on disk and emits per-ISIN symbol intervals.
+        # Must run BEFORE `actions adjust` because the back-adjust step uses
+        # symbol-history to resolve stale action ISINs (post-merger or
+        # pre-split tickers that NSE still tags to legacy ISINs).
+        continue-on-error: true
+        run: |
+          tej-bazaar symbol-history build \
+            --exchange both \
+            --prices-dir data/out \
+            --out-dir data/out/symbol_history
+
       - name: Compute adjusted prices (YTD)
         # Joins bhavcopy + actions for current year into back-adjusted prices.
-        # Runs only when both inputs exist for the year.
+        # Runs only when both inputs exist for the year. Depends on the
+        # symbol-history step above for ISIN resolution.
         continue-on-error: true
         run: |
           tej-bazaar actions adjust \
@@ -74,16 +87,6 @@ jobs:
             --prices-dir data/out \
             --actions-dir data/out/actions \
             --out-dir data/out/prices_adjusted
-
-      - name: Build symbol history
-        # Walks all bhavcopy years on disk and emits per-ISIN symbol intervals.
-        # Output is a single parquet per exchange covering the full lifetime.
-        continue-on-error: true
-        run: |
-          tej-bazaar symbol-history build \
-            --exchange both \
-            --prices-dir data/out \
-            --out-dir data/out/symbol_history
 
       - name: Publish to HF
         if: ${{ hashFiles('data/out/**/*.parquet') != '' }}

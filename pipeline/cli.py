@@ -7,11 +7,13 @@ Commands:
     tej-bazaar actions fetch --from D --to D [--exchange NSE|BSE|both]
     tej-bazaar actions adjust --year YYYY [--exchange NSE|BSE|both]
     tej-bazaar symbol-history build [--exchange NSE|BSE|both]
+    tej-bazaar reconcile --from D --to D (-s SYM1,SYM2 | --top N) [--exchange NSE|BSE]
     tej-bazaar version
 """
 
 from __future__ import annotations
 
+import time
 from datetime import date, datetime
 from enum import Enum
 from pathlib import Path
@@ -40,6 +42,7 @@ from pipeline.actions import (
     fetch_nse_actions,
     load_bse_scrip_to_isin,
     parse_actions,
+    resolve_isin_via_symbol_history,
     to_polars as actions_to_polars,
 )
 from pipeline.fetch import (
@@ -51,6 +54,12 @@ from pipeline.fetch import (
 from pipeline.parse import parse_bhavcopy
 from pipeline.publish import DEFAULT_REPO_ID, PublishError, publish_to_hf
 from pipeline.push import partition_path, write_partitioned
+from pipeline.reconcile import (
+    YahooFetchError,
+    fetch_yahoo_adjusted,
+    reconcile_symbol,
+    summarize,
+)
 from pipeline.symbol_history import build_symbol_history
 from pipeline.transform import transform
 
@@ -495,11 +504,38 @@ def actions_adjust(
 
         prices = pl.concat([pl.read_parquet(p) for p in prices_glob])
 
-        actions_path = actions_dir / f"{ex.lower()}_{year}.parquet"
-        if not actions_path.exists():
-            console.print(f"[yellow]skip[/yellow] {ex}: actions parquet missing at {actions_path}")
+        # Back-adjusting prices in `year` must apply EVERY corporate action
+        # whose ex_date > any price date in this slice — i.e. all future
+        # actions across later annual files. Otherwise a 2024 price won't
+        # see a 2025 1:1 bonus and ends up ~2x the true adjusted close.
+        future_action_paths = sorted(
+            actions_dir.glob(f"{ex.lower()}_*.parquet")
+        )
+        future_action_paths = [
+            p for p in future_action_paths
+            if _year_from_actions_filename(p) is not None
+            and _year_from_actions_filename(p) >= year
+        ]
+        if not future_action_paths:
+            console.print(f"[yellow]skip[/yellow] {ex}: no actions parquet for years >= {year}")
             continue
-        actions = pl.read_parquet(actions_path)
+        actions = pl.concat([pl.read_parquet(p) for p in future_action_paths])
+
+        # NSE sometimes tags actions to a stale ISIN (e.g. HDFC merger
+        # legacy). Re-resolve each action's ISIN against what its symbol
+        # actually traded under on ex_date in our price history. The
+        # symbol-history lookup needs to span every action's ex_date, so
+        # build it from ALL years of prices, not just the year being
+        # adjusted.
+        all_prices_paths = sorted(
+            (prices_dir / ex.lower()).rglob("*.parquet")
+        )
+        if all_prices_paths:
+            all_prices = pl.concat(
+                [pl.read_parquet(p, columns=["symbol", "isin", "date"])
+                 for p in all_prices_paths]
+            )
+            actions = resolve_isin_via_symbol_history(actions, all_prices)
 
         factors = compute_action_factors(actions, prices)
         adjusted = back_adjust(prices, factors)
@@ -568,6 +604,135 @@ def symbol_history_build(
 
 
 @app.command()
+def reconcile(
+    from_date: Annotated[str, typer.Option("--from", help="Start date YYYY-MM-DD")],
+    to_date: Annotated[str, typer.Option("--to", help="End date YYYY-MM-DD inclusive")],
+    symbols: Annotated[
+        str | None,
+        typer.Option(
+            "--symbols",
+            "-s",
+            help="Comma-separated symbol list (e.g. NESTLEIND,RELIANCE). Use --top N for auto-pick.",
+        ),
+    ] = None,
+    top: Annotated[
+        int | None,
+        typer.Option(
+            "--top",
+            "-n",
+            help="Auto-pick top N symbols by mean daily turnover over the date range.",
+        ),
+    ] = None,
+    exchange: Annotated[
+        ExchangeChoice,
+        typer.Option("--exchange", "-e", help="Exchange (NSE or BSE, not both)", case_sensitive=False),
+    ] = ExchangeChoice.NSE,
+    adjusted_dir: Annotated[
+        Path,
+        typer.Option("--adjusted-dir", help="Directory containing per-year adjusted parquet"),
+    ] = DEFAULT_PRICES_ADJUSTED_DIR,
+    tolerance_pct: Annotated[
+        float,
+        typer.Option("--tolerance", help="Per-row diff tolerance, percent"),
+    ] = 0.5,
+    sleep_between: Annotated[
+        float,
+        typer.Option("--sleep", help="Seconds to wait between Yahoo calls (rate-limit politeness)"),
+    ] = 1.5,
+) -> None:
+    """Compare local adjusted closes against Yahoo's adjusted closes.
+
+    Loads every per-year adjusted parquet that overlaps the requested range,
+    filters to the requested symbols, fetches Yahoo's adjclose series for
+    each, and reports per-symbol + overall match rate within tolerance.
+    """
+    _banner()
+    if exchange == ExchangeChoice.BOTH:
+        raise typer.BadParameter("reconcile takes one exchange at a time")
+    ex = exchange.value
+    start = _parse_date(from_date)
+    end = _parse_date(to_date)
+    if end < start:
+        raise typer.BadParameter("--to must be on or after --from")
+
+    if (symbols is None) == (top is None):
+        raise typer.BadParameter("provide exactly one of --symbols or --top")
+
+    years = list(range(start.year, end.year + 1))
+    parquet_paths = [adjusted_dir / f"{ex.lower()}_{y}.parquet" for y in years]
+    existing = [p for p in parquet_paths if p.exists()]
+    if not existing:
+        console.print(f"[red]error[/red] no adjusted parquet found for years {years} in {adjusted_dir}")
+        raise typer.Exit(code=1)
+
+    ours_full = pl.concat([pl.read_parquet(p) for p in existing])
+    ours_full = ours_full.filter(
+        (pl.col("date") >= start) & (pl.col("date") <= end)
+    )
+
+    if top is not None:
+        # Rank by mean daily turnover across the requested window. Filters
+        # out illiquid names that would dominate Yahoo failures without
+        # actually reflecting "important" stocks.
+        ranked = (
+            ours_full.group_by("symbol")
+            .agg(mean_turnover=pl.col("turnover").mean())
+            .sort("mean_turnover", descending=True)
+            .head(top)
+        )
+        sym_list = ranked["symbol"].to_list()
+        console.print(f"[dim]top {len(sym_list)} symbols by mean turnover selected[/dim]")
+    else:
+        sym_list = [s.strip() for s in symbols.split(",") if s.strip()]
+        if not sym_list:
+            raise typer.BadParameter("--symbols must contain at least one symbol")
+
+    table = Table(title=f"reconcile vs Yahoo  ({ex} {start} → {end}, ±{tolerance_pct}%)",
+                  border_style="cyan")
+    table.add_column("Symbol", style="bold")
+    table.add_column("Rows", justify="right")
+    table.add_column("Within tol", justify="right", style="green")
+    table.add_column("Max diff %", justify="right")
+    table.add_column("Mean diff %", justify="right")
+
+    stats_list = []
+    for i, sym in enumerate(sym_list):
+        ours = ours_full.filter(pl.col("symbol") == sym).select(["date", "adj_close"])
+        if ours.height == 0:
+            console.print(f"[yellow]skip[/yellow] {sym}: no rows in adjusted parquet")
+            continue
+        try:
+            ref = fetch_yahoo_adjusted(sym, ex, start, end)
+        except YahooFetchError as e:
+            console.print(f"[red]yahoo fail[/red] {sym}: {e}")
+            continue
+        s = reconcile_symbol(sym, ours, ref, tolerance_pct=tolerance_pct)
+        stats_list.append(s)
+        within_color = "green" if s.pct_within_tol >= 99.0 else "yellow" if s.pct_within_tol >= 95.0 else "red"
+        table.add_row(
+            sym,
+            str(s.rows_compared),
+            f"[{within_color}]{s.pct_within_tol:.2f}%[/{within_color}]",
+            f"{s.max_abs_diff_pct:.3f}",
+            f"{s.mean_abs_diff_pct:.3f}",
+        )
+        if i < len(sym_list) - 1:
+            time.sleep(sleep_between)
+
+    console.print(table)
+
+    if stats_list:
+        result = summarize(stats_list)
+        body = (
+            f"[bold]symbols[/bold]   {len(stats_list)}\n"
+            f"[bold]rows[/bold]      {result.overall_rows}\n"
+            f"[bold]overall[/bold]   {result.overall_pct_within_tol:.2f}% within ±{tolerance_pct}%"
+        )
+        color = "green" if result.overall_pct_within_tol >= 99.0 else "yellow"
+        console.print(Panel.fit(body, border_style=color))
+
+
+@app.command()
 def version() -> None:
     """Print version and exit."""
     console.print(f"tej-bazaar [bold cyan]{__version__}[/bold cyan]")
@@ -577,6 +742,16 @@ def _date_from_path(p: Path) -> date:
     # date=YYYY-MM-DD.parquet → YYYY-MM-DD
     stem = p.stem  # "date=2025-04-30"
     return _parse_date(stem.split("=", 1)[1])
+
+
+def _year_from_actions_filename(p: Path) -> int | None:
+    # Annual cron files are named `<exchange>_<YYYY>.parquet`. Range files
+    # like `<exchange>_<YYYYMMDD>_<YYYYMMDD>.parquet` are skipped here.
+    stem = p.stem
+    parts = stem.rsplit("_", 1)
+    if len(parts) != 2 or not parts[1].isdigit() or len(parts[1]) != 4:
+        return None
+    return int(parts[1])
 
 
 def main() -> None:

@@ -368,4 +368,4 @@ def test_actions_adjust_skips_missing_actions(tmp_path: Path):
          "--out-dir", str(tmp_path / "adjusted")],
     )
     assert result.exit_code == 0
-    assert "actions parquet missing" in result.stdout
+    assert "no actions parquet for years" in result.stdout

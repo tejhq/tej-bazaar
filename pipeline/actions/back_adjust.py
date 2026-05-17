@@ -22,6 +22,7 @@ import polars as pl
 
 from pipeline.actions.factors import compute_factor
 from pipeline.actions.schema import CorporateAction
+from pipeline.symbol_history import build_symbol_history
 
 
 def compute_action_factors(
@@ -141,6 +142,64 @@ def back_adjust(
         ))
 
     return pl.concat(out_chunks)
+
+
+def resolve_isin_via_symbol_history(
+    actions: pl.DataFrame, prices: pl.DataFrame
+) -> pl.DataFrame:
+    """Override `actions.isin` with the ISIN that `actions.symbol` traded
+    under on `actions.ex_date`, using `prices` as the authoritative ledger.
+
+    Why: NSE's corporate-actions API sometimes tags actions to a stale
+    ISIN that no longer reflects the trading instrument. The clearest
+    case is HDFC Bank: post-merger (July 2023) the ticker `HDFCBANK`
+    trades under `INE040A01034`, yet NSE still reports its 2025 1:1 bonus
+    against the legacy HDFC Ltd ISIN `INE040A01018`. Joining actions to
+    prices by that stale ISIN drops the bonus on the floor and leaves
+    pre-event prices ~2x too high.
+
+    For each action, we look up the symbol in symbol_history at the action's
+    ex_date and rewrite the ISIN to whatever the symbol actually traded
+    under that day. If lookup fails (delisted at ex_date, or symbol absent
+    from price history), the original ISIN is kept.
+    """
+    _require_columns(actions, ["symbol", "ex_date", "isin"])
+    _require_columns(prices, ["symbol", "isin", "date"])
+
+    if actions.height == 0:
+        return actions
+
+    exchange = (
+        actions["exchange"][0] if "exchange" in actions.columns and actions.height > 0
+        else "?"
+    )
+    history = build_symbol_history(prices, exchange)
+
+    # For each action, attach the factor to the ISIN that the symbol's
+    # active interval started on STRICTLY BEFORE ex_date. Two cases:
+    #  - Dividend / bonus on a stable ISIN: the active interval starts long
+    #    before ex_date; we pick that interval's ISIN (== current ISIN).
+    #  - Split with face-value change: the ISIN flips on ex_date itself, so
+    #    the new interval has valid_from == ex_date. The `<` filter skips
+    #    that brand-new interval and reaches back to the prior one. The
+    #    factor then attaches to the OLD ISIN, which carries the long
+    #    pre-event price history.
+    new_isins: list[str | None] = []
+    for row in actions.iter_rows(named=True):
+        sym = row["symbol"]
+        ex = row["ex_date"]
+        sym_intervals = history.filter(
+            (pl.col("symbol") == sym) & (pl.col("valid_from") < ex)
+        ).sort("valid_from", descending=True)
+        if sym_intervals.height > 0:
+            new_isins.append(sym_intervals["isin"][0])
+        else:
+            # No prior interval (action precedes our price coverage). Keep
+            # the original ISIN; if it doesn't match anything, the join in
+            # compute_action_factors will simply drop the row.
+            new_isins.append(row.get("isin"))
+
+    return actions.with_columns(isin=pl.Series(new_isins, dtype=pl.Utf8))
 
 
 def _row_to_action(row: dict) -> CorporateAction:

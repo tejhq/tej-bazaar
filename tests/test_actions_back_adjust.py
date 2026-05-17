@@ -7,6 +7,7 @@ from pipeline.actions import (
     CorporateAction,
     back_adjust,
     compute_action_factors,
+    resolve_isin_via_symbol_history,
     to_polars,
 )
 
@@ -253,3 +254,102 @@ def test_e2e_compute_and_back_adjust():
     assert out["adj_factor_cumulative"].to_list() == pytest.approx(
         [0.095, 0.095, 0.1, 0.1, 1.0, 1.0]
     )
+
+
+# --- resolve_isin_via_symbol_history -----------------------------------
+
+
+def _prices_full(rows: list[tuple]) -> pl.DataFrame:
+    """Prices with the (symbol, isin, date) cols required by the resolver."""
+    return pl.DataFrame(
+        rows,
+        schema={"symbol": pl.Utf8, "isin": pl.Utf8, "date": pl.Date},
+        orient="row",
+    )
+
+
+def test_resolve_isin_overrides_stale_action_isin():
+    # NSE-style bug: action carries a legacy ISIN that no longer trades.
+    # Resolver should rewrite it to whatever the symbol traded under in
+    # our price history before the ex_date.
+    actions = to_polars([
+        CorporateAction(
+            exchange="NSE", symbol="HDFCBANK", isin="INE040A01018",  # legacy
+            company="HDFC Bank", ex_date=date(2025, 8, 26),
+            record_date=None, type="bonus", ratio_num=1, ratio_den=1,
+        ),
+    ])
+    prices = _prices_full([
+        ("HDFCBANK", "INE040A01034", date(2024, 1, 2)),
+        ("HDFCBANK", "INE040A01034", date(2025, 8, 25)),
+    ])
+    resolved = resolve_isin_via_symbol_history(actions, prices)
+    assert resolved["isin"].to_list() == ["INE040A01034"]
+
+
+def test_resolve_isin_picks_prior_interval_for_split_with_isin_change():
+    # Split with face-value change flips the ISIN on ex_date itself.
+    # The factor must attach to the OLD interval's ISIN, otherwise the
+    # long pre-split history goes unadjusted.
+    actions = to_polars([
+        CorporateAction(
+            exchange="NSE", symbol="KOTAKBANK", isin="INE237A01010",  # stale
+            company="Kotak", ex_date=date(2026, 1, 14),
+            record_date=None, type="split",
+            face_value_from=5.0, face_value_to=1.0,
+        ),
+    ])
+    # Symbol KOTAKBANK trades under INE237A01028 until split day, then
+    # under INE237A01036 from 2026-01-14 onwards.
+    prices = _prices_full([
+        ("KOTAKBANK", "INE237A01028", date(2024, 1, 2)),
+        ("KOTAKBANK", "INE237A01028", date(2026, 1, 13)),
+        ("KOTAKBANK", "INE237A01036", date(2026, 1, 14)),
+        ("KOTAKBANK", "INE237A01036", date(2026, 1, 15)),
+    ])
+    resolved = resolve_isin_via_symbol_history(actions, prices)
+    # Want PRIOR ISIN so the factor lands on the long pre-split history.
+    assert resolved["isin"].to_list() == ["INE237A01028"]
+
+
+def test_resolve_isin_keeps_original_when_symbol_absent_from_prices():
+    # Action references a symbol that never appears in our price history
+    # (e.g. delisted long before our coverage starts). Resolver should
+    # leave the original ISIN alone rather than guess.
+    actions = to_polars([
+        CorporateAction(
+            exchange="NSE", symbol="OLDDELISTED", isin="INEORIG",
+            company="Delisted Co", ex_date=date(2024, 6, 1),
+            record_date=None, type="dividend", cash_amount=5.0,
+        ),
+    ])
+    prices = _prices_full([
+        ("OTHER", "INEOTHER", date(2024, 1, 2)),
+    ])
+    resolved = resolve_isin_via_symbol_history(actions, prices)
+    assert resolved["isin"].to_list() == ["INEORIG"]
+
+
+def test_resolve_isin_no_op_for_correctly_keyed_action():
+    # Happy path: action ISIN already matches the symbol's price ISIN.
+    # Resolver returns the same ISIN.
+    actions = to_polars([
+        CorporateAction(
+            exchange="NSE", symbol="RELIANCE", isin="INE002A01018",
+            company="Reliance", ex_date=date(2024, 9, 12),
+            record_date=None, type="dividend", cash_amount=10.0,
+        ),
+    ])
+    prices = _prices_full([
+        ("RELIANCE", "INE002A01018", date(2024, 1, 2)),
+        ("RELIANCE", "INE002A01018", date(2024, 9, 11)),
+    ])
+    resolved = resolve_isin_via_symbol_history(actions, prices)
+    assert resolved["isin"].to_list() == ["INE002A01018"]
+
+
+def test_resolve_isin_empty_actions_returns_unchanged():
+    actions = to_polars([])
+    prices = _prices_full([("X", "INEX", date(2024, 1, 1))])
+    resolved = resolve_isin_via_symbol_history(actions, prices)
+    assert resolved.height == 0

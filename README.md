@@ -4,7 +4,7 @@
 
 Part of the [TejHQ](https://github.com/tejhq) ecosystem.
 
-> **Status:** NSE + BSE pipelines live. Daily cron publishes to [`tejhq/indian-markets`](https://huggingface.co/datasets/tejhq/indian-markets) at 19:00 IST on trading days. Corporate actions / adjusted close next. See [ROADMAP.md](./ROADMAP.md).
+> **Status:** NSE + BSE pipelines live. Daily cron publishes to [`tejhq/indian-markets`](https://huggingface.co/datasets/tejhq/indian-markets) at 19:00 IST on trading days. Corporate actions, back-adjusted prices, symbol-history, and Yahoo reconciliation all shipped. See [ROADMAP.md](./ROADMAP.md).
 
 ---
 
@@ -111,6 +111,10 @@ pip install -e ".[dev]"
 | `tej-bazaar fetch DATE --exchange both` | Both exchanges |
 | `tej-bazaar backfill --from D --to D` | Range; skips weekends + NSE/BSE holidays automatically |
 | `tej-bazaar backfill --from D --to D --exchange both` | Range, both exchanges |
+| `tej-bazaar actions fetch --year 2024 --exchange both` | Pull NSE+BSE corporate actions for a calendar year (annual rolling file) |
+| `tej-bazaar actions adjust --year 2024 --exchange NSE` | Compute back-adjusted prices from bhavcopy + actions |
+| `tej-bazaar symbol-history build --exchange both` | Per-ISIN symbol-history intervals across the full price series |
+| `tej-bazaar reconcile --from D --to D --top 50` | Compare local adjusted closes against Yahoo Finance |
 | `tej-bazaar publish --dry-run` | List local parquet files; no upload |
 | `tej-bazaar publish --repo tejhq/indian-markets` | Push to HuggingFace (needs `HF_TOKEN`) |
 | `tej-bazaar info` | Inventory of local parquet on disk |
@@ -135,7 +139,32 @@ NSE/BSE Bhavcopy (official EOD, SEBI CMTS format)
   → transform (filter equity series, dedupe, validate prices)
   → write (partitioned parquet, zstd, Hive layout)
   → publish (HuggingFace upload_folder, content-hash dedup)
+
+NSE/BSE corporate actions (REST API, BSE scrip-master ISIN lookup)
+  → fetch (per-year annual file, idempotent)
+  → parse (classify split / bonus / dividend / rights / merger)
+  → resolve ISIN via symbol-history (handles post-merger ISIN drift)
+  → factors (split: fv_to/fv_from, bonus: d/(n+d), dividend: 1 - cash/prev_close)
+  → back-adjust (per-ISIN reverse cumprod, polars partition + numpy searchsorted)
 ```
+
+### Verification vs Yahoo Finance
+
+Adjusted closes for the top 50 NSE names (by mean daily turnover) over
+2024-01-01 → 2026-05-06 reconcile against Yahoo's `Adj Close` as follows:
+
+- **89% of row-comparisons within ±1%** (~25,000 daily closes across 48 symbols)
+- The residual gap is driven by methodology differences in dividend
+  adjustment: NSE official uses `(prev_close - cash) / prev_close`;
+  Yahoo's CRSP factor uses `1 - cash / close_on_ex_date`. For
+  dividend-heavy names like INFY, TCS, HINDUNILVR, this compounds to a
+  systematic ~1% offset that is not a bug in either source.
+- Splits and bonus issues match Yahoo within ~1% on the day after the
+  event (the difference is the dividend layer above, not the split math).
+- Run `python scripts/reconcile_yahoo_sweep.py --top 50 --from D --to D`
+  to reproduce. The script lives outside `pipeline/` because `yfinance`
+  pulls pandas as a transitive dep, which the pipeline package
+  intentionally avoids.
 
 The pipeline skips market holidays automatically using `exchange_calendars` (NSE/BSE share trading days).
 

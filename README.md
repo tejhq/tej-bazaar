@@ -112,7 +112,8 @@ pip install -e ".[dev]"
 | `tej-bazaar backfill --from D --to D` | Range; skips weekends + NSE/BSE holidays automatically |
 | `tej-bazaar backfill --from D --to D --exchange both` | Range, both exchanges |
 | `tej-bazaar actions fetch --year 2024 --exchange both` | Pull NSE+BSE corporate actions for a calendar year (annual rolling file) |
-| `tej-bazaar actions adjust --year 2024 --exchange NSE` | Compute back-adjusted prices from bhavcopy + actions |
+| `tej-bazaar actions adjust --year 2024 --exchange NSE` | Compute back-adjusted prices from bhavcopy + actions (single year) |
+| `tej-bazaar actions adjust --all-years --exchange both` | Re-adjust every year on disk (cron default; needed when future actions land) |
 | `tej-bazaar symbol-history build --exchange both` | Per-ISIN symbol-history intervals across the full price series |
 | `tej-bazaar reconcile --from D --to D --top 50` | Compare local adjusted closes against Yahoo Finance |
 | `tej-bazaar publish --dry-run` | List local parquet files; no upload |
@@ -180,7 +181,7 @@ See [ROADMAP.md](./ROADMAP.md) for the full plan.
 - [x] **Phase 2c** — GitHub Actions cron (19:00 IST weekdays, holiday-aware)
 - [ ] **Phase 3** — S3/R2 mirror, failure alerts (Slack/Discord webhook)
 - [ ] **Phase 3.5** — Legacy historical data (pre-2024 NSE/BSE formats)
-- [ ] **Phase 4** — Corporate actions, adjusted close, symbol-change history
+- [x] **Phase 4** - Corporate actions, adjusted close, symbol-change history, Yahoo reconciliation
 - [ ] **Phase 5** — Derived metrics (returns, 52w hi/lo, avg vol)
 - [ ] **Phase 6** — REST API handoff to `tej-api`, Python + JS SDKs
 

@@ -17,7 +17,7 @@ import time
 from datetime import date, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Optional
 
 import polars as pl
 import typer
@@ -460,7 +460,14 @@ def actions_fetch(
 
 @actions_app.command("adjust")
 def actions_adjust(
-    year: Annotated[int, typer.Option("--year", help="Calendar year to adjust")],
+    year: Annotated[
+        Optional[int],
+        typer.Option("--year", help="Calendar year to adjust (omit with --all-years)"),
+    ] = None,
+    all_years: Annotated[
+        bool,
+        typer.Option("--all-years", help="Re-adjust every year of bhavcopy on disk"),
+    ] = False,
     exchange: Annotated[
         ExchangeChoice,
         typer.Option("--exchange", "-e", help="Exchange to adjust", case_sensitive=False),
@@ -483,68 +490,103 @@ def actions_adjust(
     Reads bhavcopy parquet under `<prices-dir>/<ex>/year=<year>/**` and the
     actions parquet at `<actions-dir>/<ex>_<year>.parquet`. Writes adjusted
     prices to `<out-dir>/<ex>_<year>.parquet`.
+
+    Use `--all-years` to re-adjust every year on disk. Required when a new
+    corporate action lands that affects older years' adjusted closes (a 2026
+    bonus retroactively changes the 2024 adj_close for that ISIN).
     """
     _banner()
+    if all_years and year is not None:
+        raise typer.BadParameter("--year and --all-years are mutually exclusive")
+    if not all_years and year is None:
+        raise typer.BadParameter("provide --year YYYY or --all-years")
+
     exchanges = _exchanges(exchange)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     summary = Table(title="actions adjust", border_style="cyan")
     summary.add_column("Exchange", style="bold")
+    summary.add_column("Year", justify="right")
     summary.add_column("Price rows", justify="right")
     summary.add_column("Actions", justify="right")
     summary.add_column("Adjusted rows", justify="right", style="green")
     summary.add_column("Output", style="dim")
 
     for ex in exchanges:
-        prices_glob = list((prices_dir / ex.lower()).rglob(f"year={year}/**/*.parquet"))
-        if not prices_glob:
-            console.print(f"[yellow]skip[/yellow] {ex}: no bhavcopy parquet under "
-                          f"{prices_dir / ex.lower()}/year={year}")
-            continue
+        if all_years:
+            years = sorted({
+                int(p.parent.parent.name.split("=", 1)[1])
+                for p in (prices_dir / ex.lower()).rglob("year=*/month=*/*.parquet")
+                if p.parent.parent.name.startswith("year=")
+            })
+            if not years:
+                console.print(f"[yellow]skip[/yellow] {ex}: no bhavcopy parquet under "
+                              f"{prices_dir / ex.lower()}")
+                continue
+        else:
+            years = [year]
 
-        prices = pl.concat([pl.read_parquet(p) for p in prices_glob])
+        for y in years:
+            _adjust_one_year(ex, y, prices_dir, actions_dir, out_dir, summary)
+
+    console.print(summary)
+
+
+def _adjust_one_year(
+    ex: str,
+    year: int,
+    prices_dir: Path,
+    actions_dir: Path,
+    out_dir: Path,
+    summary: Table,
+) -> None:
+    prices_glob = list((prices_dir / ex.lower()).rglob(f"year={year}/**/*.parquet"))
+    if not prices_glob:
+        console.print(f"[yellow]skip[/yellow] {ex} {year}: no bhavcopy parquet under "
+                      f"{prices_dir / ex.lower()}/year={year}")
+        return
+
+    prices = pl.concat([pl.read_parquet(p) for p in prices_glob])
 
         # Back-adjusting prices in `year` must apply EVERY corporate action
         # whose ex_date > any price date in this slice — i.e. all future
         # actions across later annual files. Otherwise a 2024 price won't
         # see a 2025 1:1 bonus and ends up ~2x the true adjusted close.
-        future_action_paths = sorted(
-            actions_dir.glob(f"{ex.lower()}_*.parquet")
+    future_action_paths = sorted(
+        actions_dir.glob(f"{ex.lower()}_*.parquet")
+    )
+    future_action_paths = [
+        p for p in future_action_paths
+        if _year_from_actions_filename(p) is not None
+        and _year_from_actions_filename(p) >= year
+    ]
+    if not future_action_paths:
+        console.print(f"[yellow]skip[/yellow] {ex} {year}: no actions parquet for years >= {year}")
+        return
+    actions = pl.concat([pl.read_parquet(p) for p in future_action_paths])
+
+    # NSE sometimes tags actions to a stale ISIN (e.g. HDFC merger
+    # legacy). Re-resolve each action's ISIN against what its symbol
+    # actually traded under on ex_date in our price history. The
+    # symbol-history lookup needs to span every action's ex_date, so
+    # build it from ALL years of prices, not just the year being
+    # adjusted.
+    all_prices_paths = sorted(
+        (prices_dir / ex.lower()).rglob("*.parquet")
+    )
+    if all_prices_paths:
+        all_prices = pl.concat(
+            [pl.read_parquet(p, columns=["symbol", "isin", "date"])
+             for p in all_prices_paths]
         )
-        future_action_paths = [
-            p for p in future_action_paths
-            if _year_from_actions_filename(p) is not None
-            and _year_from_actions_filename(p) >= year
-        ]
-        if not future_action_paths:
-            console.print(f"[yellow]skip[/yellow] {ex}: no actions parquet for years >= {year}")
-            continue
-        actions = pl.concat([pl.read_parquet(p) for p in future_action_paths])
+        actions = resolve_isin_via_symbol_history(actions, all_prices)
 
-        # NSE sometimes tags actions to a stale ISIN (e.g. HDFC merger
-        # legacy). Re-resolve each action's ISIN against what its symbol
-        # actually traded under on ex_date in our price history. The
-        # symbol-history lookup needs to span every action's ex_date, so
-        # build it from ALL years of prices, not just the year being
-        # adjusted.
-        all_prices_paths = sorted(
-            (prices_dir / ex.lower()).rglob("*.parquet")
-        )
-        if all_prices_paths:
-            all_prices = pl.concat(
-                [pl.read_parquet(p, columns=["symbol", "isin", "date"])
-                 for p in all_prices_paths]
-            )
-            actions = resolve_isin_via_symbol_history(actions, all_prices)
-
-        factors = compute_action_factors(actions, prices)
-        adjusted = back_adjust(prices, factors)
-        out_path = out_dir / f"{ex.lower()}_{year}.parquet"
-        adjusted.write_parquet(out_path)
-        summary.add_row(ex, str(prices.height), str(actions.height),
-                        str(adjusted.height), str(out_path))
-
-    console.print(summary)
+    factors = compute_action_factors(actions, prices)
+    adjusted = back_adjust(prices, factors)
+    out_path = out_dir / f"{ex.lower()}_{year}.parquet"
+    adjusted.write_parquet(out_path)
+    summary.add_row(ex, str(year), str(prices.height), str(actions.height),
+                    str(adjusted.height), str(out_path))
 
 
 symbol_history_app = typer.Typer(

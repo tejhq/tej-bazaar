@@ -12,3 +12,6 @@ data/raw/
 data/out/
 !data/sample/
 .DS_Store
+
+# Local sweep artifacts
+reconcile_report.md

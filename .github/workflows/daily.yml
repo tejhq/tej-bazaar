@@ -75,14 +75,16 @@ jobs:
             --prices-dir data/out \
             --out-dir data/out/symbol_history
 
-      - name: Compute adjusted prices (YTD)
-        # Joins bhavcopy + actions for current year into back-adjusted prices.
-        # Runs only when both inputs exist for the year. Depends on the
-        # symbol-history step above for ISIN resolution.
+      - name: Compute adjusted prices (all years)
+        # Joins bhavcopy + actions into back-adjusted prices for EVERY year
+        # on disk. All-years (not YTD) because a future bonus / split makes
+        # past adjusted closes stale: a 2026 1:1 bonus retroactively halves
+        # the 2024 adj_close for that ISIN. Depends on the symbol-history
+        # step above for ISIN resolution.
         continue-on-error: true
         run: |
           tej-bazaar actions adjust \
-            --year "${{ steps.year.outputs.value }}" \
+            --all-years \
             --exchange both \
             --prices-dir data/out \
             --actions-dir data/out/actions \

@@ -369,3 +369,156 @@ def test_actions_adjust_skips_missing_actions(tmp_path: Path):
     )
     assert result.exit_code == 0
     assert "no actions parquet for years" in result.stdout
+
+
+# --- metrics build -----------------------------------------------------
+
+
+def _write_adjusted_parquet(adjusted_dir: Path, exchange: str, year: int,
+                            rows: list[tuple]) -> None:
+    """Write a minimal adjusted parquet with the cols metrics requires."""
+    schema = {
+        "isin": pl.Utf8,
+        "date": pl.Date,
+        "symbol": pl.Utf8,
+        "adj_close": pl.Float64,
+        "volume": pl.Int64,
+        "turnover": pl.Float64,
+    }
+    df = pl.DataFrame(rows, schema=schema, orient="row")
+    adjusted_dir.mkdir(parents=True, exist_ok=True)
+    df.write_parquet(adjusted_dir / f"{exchange.lower()}_{year}.parquet")
+
+
+def test_metrics_build_writes_per_year_parquet(tmp_path: Path):
+    adjusted_dir = tmp_path / "adjusted"
+    out_dir = tmp_path / "metrics"
+    rows = [
+        ("INE001", date(2025, 1, d), "X", 100.0 + d, 1000, (100.0 + d) * 1000)
+        for d in range(1, 6)
+    ]
+    _write_adjusted_parquet(adjusted_dir, "NSE", 2025, rows)
+
+    result = runner.invoke(
+        app,
+        ["metrics", "build",
+         "--year", "2025",
+         "--exchange", "NSE",
+         "--adjusted-dir", str(adjusted_dir),
+         "--out-dir", str(out_dir)],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    out_path = out_dir / "nse_2025.parquet"
+    assert out_path.exists()
+    df = pl.read_parquet(out_path).sort("date")
+    # Returns + rolling cols are all present
+    for col in ("ret_1d", "ret_ytd", "high_52w", "avg_vol_20d", "avg_turnover_20d"):
+        assert col in df.columns
+    # 5 rows in, 5 rows out
+    assert df.height == 5
+    # 1d return: row 1 null, row 2 = (102-101)/101
+    assert df["ret_1d"][0] is None
+    assert df["ret_1d"][1] == pytest.approx((102 - 101) / 101)
+
+
+def test_metrics_build_all_years_writes_each(tmp_path: Path):
+    adjusted_dir = tmp_path / "adjusted"
+    out_dir = tmp_path / "metrics"
+    for y in (2024, 2025):
+        rows = [
+            ("INE001", date(y, 1, d), "X", 100.0 + d, 1000, (100.0 + d) * 1000)
+            for d in range(1, 4)
+        ]
+        _write_adjusted_parquet(adjusted_dir, "NSE", y, rows)
+
+    result = runner.invoke(
+        app,
+        ["metrics", "build",
+         "--all-years",
+         "--exchange", "NSE",
+         "--adjusted-dir", str(adjusted_dir),
+         "--out-dir", str(out_dir)],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert (out_dir / "nse_2024.parquet").exists()
+    assert (out_dir / "nse_2025.parquet").exists()
+
+
+def test_metrics_build_requires_year_or_all(tmp_path: Path):
+    result = runner.invoke(
+        app,
+        ["metrics", "build",
+         "--exchange", "NSE",
+         "--adjusted-dir", str(tmp_path / "adjusted"),
+         "--out-dir", str(tmp_path / "metrics")],
+    )
+    # typer raises BadParameter -> exit_code 2 (CliRunner sends usage to
+    # stderr, not stdout, so we just assert on the exit code).
+    assert result.exit_code != 0
+
+
+def test_metrics_build_year_and_all_mutually_exclusive(tmp_path: Path):
+    result = runner.invoke(
+        app,
+        ["metrics", "build",
+         "--year", "2025",
+         "--all-years",
+         "--exchange", "NSE",
+         "--adjusted-dir", str(tmp_path / "adjusted"),
+         "--out-dir", str(tmp_path / "metrics")],
+    )
+    assert result.exit_code != 0
+
+
+def test_metrics_build_skips_year_without_adjusted_file(tmp_path: Path):
+    adjusted_dir = tmp_path / "adjusted"
+    _write_adjusted_parquet(adjusted_dir, "NSE", 2024, [
+        ("INE001", date(2024, 1, 1), "X", 100.0, 1000, 100_000.0),
+    ])
+    # Ask for 2025 which doesn't exist on disk; skips cleanly.
+    result = runner.invoke(
+        app,
+        ["metrics", "build",
+         "--year", "2025",
+         "--exchange", "NSE",
+         "--adjusted-dir", str(adjusted_dir),
+         "--out-dir", str(tmp_path / "metrics")],
+    )
+    assert result.exit_code == 0
+    assert "no adjusted parquet for that year" in result.stdout
+
+
+def test_metrics_build_year_uses_prior_years_for_window(tmp_path: Path):
+    # 2024 has 25 days of history; 2025 has 5 rows. With --year 2025, the
+    # 20-day vol window for 2025-01-01 should already be populated using
+    # the 20 most recent 2024 rows as seed.
+    adjusted_dir = tmp_path / "adjusted"
+    rows_2024 = [
+        ("INE001", date(2024, 12, 1) + (date(2024, 12, 2) - date(2024, 12, 1)) * i,
+         "X", 100.0 + i, 1000 + i * 10, (100.0 + i) * (1000 + i * 10))
+        for i in range(25)
+    ]
+    rows_2025 = [
+        ("INE001", date(2025, 1, d), "X", 200.0 + d, 2000, (200.0 + d) * 2000)
+        for d in range(1, 6)
+    ]
+    _write_adjusted_parquet(adjusted_dir, "NSE", 2024, rows_2024)
+    _write_adjusted_parquet(adjusted_dir, "NSE", 2025, rows_2025)
+
+    result = runner.invoke(
+        app,
+        ["metrics", "build",
+         "--year", "2025",
+         "--exchange", "NSE",
+         "--adjusted-dir", str(adjusted_dir),
+         "--out-dir", str(tmp_path / "metrics")],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    df = pl.read_parquet(tmp_path / "metrics" / "nse_2025.parquet").sort("date")
+    # First row of 2025 has 20 prior days from 2024 -> avg_vol_20d populated.
+    assert df["avg_vol_20d"][0] is not None
+    # Output is filtered to 2025 only (5 rows).
+    assert df.height == 5
+    assert all(d.year == 2025 for d in df["date"].to_list())

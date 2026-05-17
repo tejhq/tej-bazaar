@@ -7,6 +7,7 @@ Commands:
     tej-bazaar actions fetch --from D --to D [--exchange NSE|BSE|both]
     tej-bazaar actions adjust --year YYYY [--exchange NSE|BSE|both]
     tej-bazaar symbol-history build [--exchange NSE|BSE|both]
+    tej-bazaar metrics build --year YYYY | --all-years [--exchange NSE|BSE|both]
     tej-bazaar reconcile --from D --to D (-s SYM1,SYM2 | --top N) [--exchange NSE|BSE]
     tej-bazaar version
 """
@@ -60,6 +61,7 @@ from pipeline.reconcile import (
     reconcile_symbol,
     summarize,
 )
+from pipeline.metrics import compute_returns, compute_rolling
 from pipeline.symbol_history import build_symbol_history
 from pipeline.transform import transform
 
@@ -69,6 +71,7 @@ DEFAULT_ACTIONS_CACHE_DIR = Path("data/raw/actions")
 DEFAULT_ACTIONS_OUT_DIR = Path("data/out/actions")
 DEFAULT_PRICES_ADJUSTED_DIR = Path("data/out/prices_adjusted")
 DEFAULT_SYMBOL_HISTORY_DIR = Path("data/out/symbol_history")
+DEFAULT_METRICS_DIR = Path("data/out/metrics")
 
 
 class ExchangeChoice(str, Enum):
@@ -641,6 +644,99 @@ def symbol_history_build(
         history.write_parquet(out_path)
         summary.add_row(ex, str(len(files)), str(prices.height),
                         str(history.height), str(out_path))
+
+    console.print(summary)
+
+
+metrics_app = typer.Typer(
+    name="metrics",
+    help="Build derived metrics (returns + rolling) from back-adjusted prices.",
+    no_args_is_help=True,
+)
+app.add_typer(metrics_app)
+
+
+@metrics_app.command("build")
+def metrics_build(
+    year: Annotated[
+        Optional[int],
+        typer.Option("--year", help="Calendar year to build (omit with --all-years)"),
+    ] = None,
+    all_years: Annotated[
+        bool,
+        typer.Option("--all-years", help="Build metrics for every adjusted year on disk"),
+    ] = False,
+    exchange: Annotated[
+        ExchangeChoice,
+        typer.Option("--exchange", "-e", help="Exchange to build", case_sensitive=False),
+    ] = ExchangeChoice.BOTH,
+    adjusted_dir: Annotated[
+        Path,
+        typer.Option("--adjusted-dir", help="Directory containing per-year adjusted parquet"),
+    ] = DEFAULT_PRICES_ADJUSTED_DIR,
+    out_dir: Annotated[
+        Path,
+        typer.Option("--out-dir", help="Directory for per-year metrics parquet"),
+    ] = DEFAULT_METRICS_DIR,
+) -> None:
+    """Build per-year metrics parquet (returns + rolling windows).
+
+    Output is `<out-dir>/<ex>_<year>.parquet`, one row per (isin, date)
+    in `<year>`. Always reads ALL prior years for the same exchange
+    even when building a single year, because rolling windows (up to
+    252 trading days) need a full lookback to populate.
+    """
+    _banner()
+    if all_years and year is not None:
+        raise typer.BadParameter("--year and --all-years are mutually exclusive")
+    if not all_years and year is None:
+        raise typer.BadParameter("provide --year YYYY or --all-years")
+
+    exchanges = _exchanges(exchange)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    summary = Table(title="metrics build", border_style="cyan")
+    summary.add_column("Exchange", style="bold")
+    summary.add_column("Year", justify="right")
+    summary.add_column("Rows", justify="right", style="green")
+    summary.add_column("Output", style="dim")
+
+    for ex in exchanges:
+        files = sorted(adjusted_dir.glob(f"{ex.lower()}_*.parquet"))
+        files = [
+            p for p in files
+            if _year_from_actions_filename(p) is not None
+        ]
+        if not files:
+            console.print(f"[yellow]skip[/yellow] {ex}: no adjusted parquet under {adjusted_dir}")
+            continue
+
+        years_on_disk = sorted({_year_from_actions_filename(p) for p in files})
+        if all_years:
+            target_years = years_on_disk
+        else:
+            if year not in years_on_disk:
+                console.print(
+                    f"[yellow]skip[/yellow] {ex} {year}: no adjusted parquet for that year"
+                )
+                continue
+            target_years = [year]
+
+        # Read every available year to seed the 252-day rolling window;
+        # filter to target on write.
+        full_adjusted = pl.concat(
+            [pl.read_parquet(p) for p in files]
+        ).select(["isin", "date", "symbol", "adj_close", "volume", "turnover"])
+
+        returns = compute_returns(full_adjusted)
+        rolling = compute_rolling(full_adjusted).drop(["symbol", "adj_close"])
+        metrics = returns.join(rolling, on=["isin", "date"], how="left")
+
+        for y in target_years:
+            slice_ = metrics.filter(pl.col("date").dt.year() == y)
+            out_path = out_dir / f"{ex.lower()}_{y}.parquet"
+            slice_.write_parquet(out_path)
+            summary.add_row(ex, str(y), str(slice_.height), str(out_path))
 
     console.print(summary)
 

@@ -4,7 +4,7 @@
 
 Part of the [TejHQ](https://github.com/tejhq) ecosystem.
 
-> **Status:** NSE + BSE pipelines live. Daily cron publishes to [`tejhq/indian-markets`](https://huggingface.co/datasets/tejhq/indian-markets) at 19:00 IST on trading days. Corporate actions, back-adjusted prices, symbol-history, and Yahoo reconciliation all shipped. See [ROADMAP.md](./ROADMAP.md).
+> **Status:** NSE + BSE pipelines live. Daily cron publishes to [`tejhq/indian-markets`](https://huggingface.co/datasets/tejhq/indian-markets) at 19:00 IST on trading days. Corporate actions, back-adjusted prices, symbol-history, Yahoo reconciliation, and derived metrics (returns + rolling 52w / 20d / 60d windows) all shipped. See [ROADMAP.md](./ROADMAP.md).
 
 ---
 
@@ -115,6 +115,7 @@ pip install -e ".[dev]"
 | `tej-bazaar actions adjust --year 2024 --exchange NSE` | Compute back-adjusted prices from bhavcopy + actions (single year) |
 | `tej-bazaar actions adjust --all-years --exchange both` | Re-adjust every year on disk (cron default; needed when future actions land) |
 | `tej-bazaar symbol-history build --exchange both` | Per-ISIN symbol-history intervals across the full price series |
+| `tej-bazaar metrics build --all-years --exchange both` | Returns (1d/5d/21d/63d/126d/252d/YTD) + rolling 52w hi/lo + 20d/60d avg vol/turnover |
 | `tej-bazaar reconcile --from D --to D --top 50` | Compare local adjusted closes against Yahoo Finance |
 | `tej-bazaar publish --dry-run` | List local parquet files; no upload |
 | `tej-bazaar publish --repo tejhq/indian-markets` | Push to HuggingFace (needs `HF_TOKEN`) |
@@ -182,8 +183,8 @@ See [ROADMAP.md](./ROADMAP.md) for the full plan.
 - [ ] **Phase 3** — S3/R2 mirror, failure alerts (Slack/Discord webhook)
 - [ ] **Phase 3.5** — Legacy historical data (pre-2024 NSE/BSE formats)
 - [x] **Phase 4** - Corporate actions, adjusted close, symbol-change history, Yahoo reconciliation
-- [ ] **Phase 5** — Derived metrics (returns, 52w hi/lo, avg vol)
-- [ ] **Phase 6** — REST API handoff to `tej-api`, Python + JS SDKs
+- [x] **Phase 5** - Derived metrics (returns, 52w hi/lo, avg vol / turnover)
+- [ ] **Phase 6** - REST API handoff to `tej-api`, Python + JS SDKs
 
 ---
 

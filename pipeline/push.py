@@ -10,8 +10,6 @@ Layout (Hive-style, plays well with DuckDB / pyarrow / HF datasets):
 
 One file per (exchange, date). Multi-date input is split into one file each.
 Re-running for the same date overwrites the existing file (idempotent).
-
-HuggingFace push is deferred to phase 2.
 """
 
 from __future__ import annotations

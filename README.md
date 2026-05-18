@@ -34,7 +34,14 @@ NSE and BSE both moved to the new **SEBI CMTS bhavcopy format** around late 2023
 
 Pre-cutover bhavcopies use legacy formats with different filenames and column names. Parsing them needs a separate code path; tracked under [Phase 3.5 in ROADMAP](./ROADMAP.md#phase-35--legacy-historical-data). For now we publish a clean, uniform CMTS-era dataset.
 
-### Output schema (per row)
+### Output trees
+
+Five parquet trees are produced and published, each under its own top-level
+prefix on HuggingFace and `data/out/` locally.
+
+#### 1. Bhavcopy (`nse/`, `bse/`)
+
+Hive-partitioned by trading date: `<ex>/year=YYYY/month=MM/date=YYYY-MM-DD.parquet`.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -49,6 +56,65 @@ Pre-cutover bhavcopies use legacy formats with different filenames and column na
 | `volume` | Int64 | Total traded volume (shares) |
 | `turnover` | Float64 | Total traded value (rupees) |
 | `trades` | Int64 | Number of trades executed |
+
+#### 2. Corporate actions (`actions/`)
+
+One file per exchange per calendar year: `actions/<ex>_<YYYY>.parquet`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `exchange` | Utf8 | `NSE` or `BSE` |
+| `symbol` | Utf8 | Ticker on `ex_date` |
+| `isin` | Utf8 | ISIN as reported by the source (may be a stale post-merger ISIN; see resolver in `pipeline/actions/back_adjust.py`) |
+| `company` | Utf8 | Issuer name |
+| `ex_date` | Date | First trading day on which the price is ex the action |
+| `record_date` | Date | Record date if reported, else null |
+| `type` | Utf8 | One of `dividend`, `split`, `bonus`, `rights`, `buyback`, `demerger`, `merger`, `agm`, `other` |
+| `ratio_num` / `ratio_den` | Int64 | Bonus / rights ratio numerator and denominator |
+| `cash_amount` | Float64 | Per-share cash for dividends |
+| `face_value_from` / `face_value_to` | Float64 | Face values for splits |
+| `raw_subject` | Utf8 | Verbatim source description, kept for audit |
+
+#### 3. Back-adjusted prices (`prices_adjusted/`)
+
+One file per exchange per calendar year: `prices_adjusted/<ex>_<YYYY>.parquet`.
+Same columns as the bhavcopy, plus:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `adj_factor_cumulative` | Float64 | Product of factors of all corporate actions with ex_date > `date` for this ISIN. `1.0` when no later actions. |
+| `adj_close` | Float64 | `close * adj_factor_cumulative`; continuous through splits, bonuses, dividends. |
+
+#### 4. Symbol history (`symbol_history/`)
+
+One file per exchange: `symbol_history/<ex>.parquet`. Each row is one
+contiguous interval during which an ISIN traded under a single symbol.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `exchange` | Utf8 | `NSE` or `BSE` |
+| `isin` | Utf8 | Stable instrument ID |
+| `symbol` | Utf8 | Symbol active during the interval |
+| `valid_from` | Date | First trading day of the interval |
+| `valid_to` | Date | Last trading day of the interval |
+| `trading_days` | Int64 | Number of trading days in the interval |
+
+#### 5. Derived metrics (`metrics/`)
+
+One file per exchange per calendar year: `metrics/<ex>_<YYYY>.parquet`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `date`, `symbol`, `isin`, `adj_close` | (as above) | Carried for joining |
+| `ret_1d` / `ret_5d` / `ret_21d` / `ret_63d` / `ret_126d` / `ret_252d` | Float64 | Simple price returns over N trading days |
+| `ret_ytd` | Float64 | Return since first trading day of `date`'s calendar year |
+| `high_52w` / `low_52w` | Float64 | Max / min `adj_close` over last 252 trading days |
+| `pct_off_52w_high` / `pct_off_52w_low` | Float64 | `adj_close / high_52w - 1` and `adj_close / low_52w - 1` |
+| `avg_vol_20d` / `avg_vol_60d` | Float64 | Rolling mean of raw `volume` |
+| `avg_turnover_20d` | Float64 | Rolling mean of raw `turnover` |
+
+Rolling windows require a full window of prior history; bootstrap rows are
+null at that horizon rather than computed off a partial window.
 
 ---
 
@@ -83,7 +149,7 @@ import polars as pl
 df = pl.read_parquet("data/out/nse/year=2025/month=04/date=2025-04-30.parquet")
 ```
 
-### Via REST API (Phase 6 — separate `tej-api` repo, not live)
+### Via REST API (Phase 6, separate `tej-api` repo, not live)
 
 ```bash
 curl https://api.tejhq.dev/v1/ohlcv?symbol=RELIANCE&from=2025-01-01&to=2025-04-30
@@ -115,7 +181,7 @@ pip install -e ".[dev]"
 | `tej-bazaar actions adjust --year 2024 --exchange NSE` | Compute back-adjusted prices from bhavcopy + actions (single year) |
 | `tej-bazaar actions adjust --all-years --exchange both` | Re-adjust every year on disk (cron default; needed when future actions land) |
 | `tej-bazaar symbol-history build --exchange both` | Per-ISIN symbol-history intervals across the full price series |
-| `tej-bazaar metrics build --all-years --exchange both` | Returns (1d/5d/21d/63d/126d/252d/YTD) + rolling 52w hi/lo + 20d/60d avg vol/turnover |
+| `tej-bazaar metrics build --all-years --exchange both` | Returns (1d/5d/21d/63d/126d/252d/YTD) + rolling 52w hi/lo + 20d/60d avg vol + 20d avg turnover |
 | `tej-bazaar reconcile --from D --to D --top 50` | Compare local adjusted closes against Yahoo Finance |
 | `tej-bazaar publish --dry-run` | List local parquet files; no upload |
 | `tej-bazaar publish --repo tejhq/indian-markets` | Push to HuggingFace (needs `HF_TOKEN`) |
@@ -163,10 +229,11 @@ Adjusted closes for the top 50 NSE names (by mean daily turnover) over
   systematic ~1% offset that is not a bug in either source.
 - Splits and bonus issues match Yahoo within ~1% on the day after the
   event (the difference is the dividend layer above, not the split math).
-- Run `python scripts/reconcile_yahoo_sweep.py --top 50 --from D --to D`
+- Run `python scripts/reconcile_yahoo_sweep.py --top 50 --from D --to D --tolerance 1.0`
   to reproduce. The script lives outside `pipeline/` because `yfinance`
   pulls pandas as a transitive dep, which the pipeline package
-  intentionally avoids.
+  intentionally avoids; install it via the optional `reconcile` extra:
+  `pip install -e ".[reconcile]"`.
 
 The pipeline skips market holidays automatically using `exchange_calendars` (NSE/BSE share trading days).
 

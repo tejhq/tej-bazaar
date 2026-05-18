@@ -22,6 +22,12 @@ dev = [
     "ruff>=0.5",
     "responses>=0.25",
 ]
+# Optional: only needed to run scripts/reconcile_yahoo_sweep.py. Kept
+# separate because yfinance transitively requires pandas, which the
+# pipeline itself does not.
+reconcile = [
+    "yfinance>=0.2",
+]
 
 [project.scripts]
 tej-bazaar = "pipeline.cli:main"

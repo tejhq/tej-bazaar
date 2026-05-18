@@ -4,124 +4,112 @@
 
 ## Guiding principles
 
-1. **Official source only** — Bhavcopy from NSE/BSE. No broker redistribution. Keeps us legally clean to republish.
-2. **Idempotent pipeline** — re-running a date produces identical output. No hidden state.
-3. **Partitioned parquet** — `exchange/year=YYYY/month=MM/date=YYYY-MM-DD.parquet`. Scales to decades, prunes well in DuckDB / HF.
-4. **Pipeline ≠ API** — this repo ingests + publishes. Serving lives in a separate `tej-api` repo that reads our parquet.
+1. **Official source only**. Bhavcopy from NSE/BSE. No broker redistribution. Keeps us legally clean to republish.
+2. **Idempotent pipeline**. Re-running a date produces identical output. No hidden state.
+3. **Partitioned parquet**. Bhavcopy is Hive-partitioned by date; derived datasets are one file per exchange per year. Scales to decades, prunes well in DuckDB / HF.
+4. **Pipeline is not the API**. This repo ingests and publishes. Serving lives in a separate `tej-api` repo that reads our parquet.
 
 ---
 
-## Phase 1 — Foundation (DONE)
+## Phase 1 - Foundation (DONE)
 
 - [x] README + license + scaffold
 - [x] NSE holiday calendar (`exchange_calendars` wrapper, XBOM)
-- [x] NSE bhavcopy fetcher (zip → CSV, retries, idempotent)
-- [x] CSV → Polars DataFrame parser, normalized schema (SEBI CMTS)
+- [x] NSE bhavcopy fetcher (zip to CSV, retries, idempotent)
+- [x] CSV to Polars DataFrame parser, normalized schema (SEBI CMTS)
 - [x] Transform: filter series, validate prices, dedupe, sort
 - [x] Local parquet writer with Hive partition layout
 - [x] Typer + Rich CLI: `tej-bazaar fetch | backfill | info | version`
 - [x] Golden-fixture tests (parser + transform + push + cli)
 
-## Phase 2 — Publish
+## Phase 2 - Publish (DONE)
 
 - [x] BSE bhavcopy fetcher + parser (same SEBI CMTS schema, plain CSV)
 - [x] Exchange-aware transform (NSE: EQ/BE/BZ; BSE: A/B/T)
 - [x] CLI `--exchange NSE|BSE|both` for fetch + backfill
 - [x] HuggingFace push (`tej-bazaar publish`, content-hash dedup, dry-run)
-- [x] GitHub Actions cron — `.github/workflows/daily.yml`, 13:30 UTC (19:00 IST), Mon–Fri, holiday-safe (skip publish if no parquet written)
-- [ ] Backfill script (one-shot historical load, both exchanges)
+- [x] GitHub Actions cron in `.github/workflows/daily.yml`: 13:30 UTC (19:00 IST), Mon-Fri, holiday-safe (skip publish if no parquet written)
+- [x] Backfill script (`tej-bazaar backfill --from D --to D --exchange both`)
 - [ ] Sample data committed under `data/sample/`
 
-## Phase 3 — Mirror & resilience
+## Phase 3 - Mirror & resilience (NOT STARTED)
 
 - [ ] S3/R2 mirror (in addition to HF) for direct parquet download
-- [ ] Health check / failure alerts (cron failures → GitHub issue or webhook)
-- [ ] Retry + backoff on transient bhavcopy 5xx
-- [ ] Source diff check — flag rows that change after publish (corporate actions)
+- [ ] Health check / failure alerts (cron failures to GitHub issue or Slack/Discord webhook)
+- [ ] Retry + backoff on transient bhavcopy 5xx (partially in place for fetch; extend to actions + publish)
+- [ ] Source diff check: flag rows that change after publish (late corp action attribution, restatements)
 
-## Phase 3.5 — Legacy historical data
+## Phase 3.5 - Legacy historical data (NOT STARTED)
 
 The current pipeline targets the **SEBI CMTS bhavcopy format** (NSE: from 2024-01-01,
-BSE: from ~mid-2023). Pre-cutover bhavcopies use legacy formats with different column
-names and layouts:
+BSE: from ~mid-2023). Pre-cutover bhavcopies use legacy formats with different
+column names and layouts:
 
 - NSE legacy: `cm{DDMMYY}bhav.csv.zip` (e.g. `cm30APR23bhav.csv.zip`)
 - BSE legacy: `EQ_ISINCODE_{DDMMYY}.zip` containing `EQ{DDMMYY}.CSV`
 
-To extend coverage backward (2010s → 2023):
+To extend coverage backward (2010s to 2023):
 
 - [ ] Legacy NSE parser (different columns: SYMBOL, OPEN, HIGH, ...)
 - [ ] Legacy BSE parser
-- [ ] Format detection in `parse.py` — sniff header, dispatch to right parser
+- [ ] Format detection in `parse.py`: sniff header, dispatch to right parser
 - [ ] Backfill validation against known-good external sources for sanity
 
-Decision deferred — start with clean CMTS-era data, expand backward once steady-state
-publishing works.
+## Phase 4 - Corporate actions & adjustments (DONE)
 
-## Phase 4 — Corporate actions & adjustments (ACTIVE)
+Bhavcopy publishes **unadjusted** prices. A 1:1 split looks like a -50% crash;
+a Rs 5 dividend on a Rs 100 stock looks like a -5% drop. This phase added an
+adjusted-close layer alongside raw.
 
-Bhavcopy publishes **unadjusted** prices. A 1:1 split looks like a -50% crash; a
-₹5 dividend on a ₹100 stock looks like a -5% drop. Useless for backtests, returns,
-charts, ML features. This phase adds adjusted prices alongside raw.
+### 4a - Corporate actions ingestion (DONE)
 
-### 4a — Corporate actions ingestion
+- [x] Fetch NSE corporate actions feed (`/api/corporates-corporateActions`, browser-header dance, ISIN-keyed)
+- [x] Fetch BSE corporate actions feed (direct REST + scrip-master ISIN map)
+- [x] Normalize into single `actions` table: exchange, symbol, isin, ex_date, type, ratio_num/den, cash_amount, face_value_from/to, raw_subject. Types: `dividend, split, bonus, rights, buyback, demerger, merger, agm, other`.
+- [x] Idempotent fetcher: annual per-exchange parquet `actions/<ex>_<YYYY>.parquet`
+- [x] Fixture-driven parser tests for each action type
 
-- [ ] Fetch NSE corporate actions feed (`/api/corporates-corporateActions` or archive CSV)
-- [ ] Fetch BSE corporate actions feed
-- [ ] Normalize into single `actions` table:
-  `symbol | isin | ex_date | type | ratio | cash_amount | record_date | raw`
-  where `type ∈ {split, bonus, dividend, rights, merger, demerger, rename}`
-- [ ] Idempotent fetcher + Hive-partitioned parquet under `actions/<exchange>/year=YYYY/...`
-- [ ] Tests: fixture-driven parser per action type
+### 4b - Adjustment factor computation (DONE)
 
-### 4b — Adjustment factor computation
+- [x] Per (isin, ex_date) compute multiplicative factor:
+  - Split / face-value change: factor = `face_value_to / face_value_from`
+  - Bonus N:M: factor = `M / (N + M)`
+  - Dividend D on prior close C: factor = `(C - D) / C`
+- [x] Apply factors **backward** from latest date (reverse cumulative product, per-ISIN numpy / `searchsorted`)
+- [x] Emit `prices_adjusted/<ex>_<YYYY>.parquet` with `adj_factor_cumulative` and `adj_close` columns alongside raw OHLC
 
-- [ ] Per (symbol, ex_date) compute multiplicative factor:
-  - Split N:1 → factor = 1/N
-  - Bonus N:M → factor = M/(N+M)
-  - Dividend D on close C → factor = (C - D) / C
-- [ ] Apply factors **backward** from latest date (cumulative product)
-- [ ] Generate `prices_adjusted/` parquet alongside raw `prices/`:
-  same schema, OHLC + volume back-adjusted
+### 4c - Symbol continuity (DONE)
 
-### 4c — Symbol continuity
+- [x] `symbol_history/<ex>.parquet`: per-ISIN intervals of `(symbol, valid_from, valid_to, trading_days)`
+- [x] Helper APIs `lookup_isin(symbol, on_date)` and `lookup_current_symbol(isin)`
+- [x] In-memory build also used by the adjust step to resolve stale post-merger / pre-split ISINs that NSE still tags to legacy identifiers (HDFCBANK / KOTAKBANK / BAJFINANCE / SHRIRAMFIN cases)
 
-- [ ] Build `symbol_history` table — ISIN as primary key, list of `(symbol, valid_from, valid_to)` ranges
-- [ ] Handle: pure rename (TATAMOTORS → TATAMOTORS-DVR collapse), merger absorption, demerger split
-- [ ] Helper API: `resolve_symbol(isin, on_date) -> symbol` and reverse
+### 4d - Reconciliation (DONE)
 
-### 4d — Reconciliation
+- [x] `tej-bazaar reconcile` CLI: compares local adjusted close to Yahoo `Adj Close` over a date range and symbol set
+- [x] Headline: top 50 NSE by mean turnover, 2024-01-01 to 2026-05-06, **89% of ~25K daily comparisons within +-1%**
+- [x] Residual gap is a documented methodology delta (NSE `(prev_close - cash) / prev_close` vs Yahoo CRSP `1 - cash / close_on_ex_date`), not a bug
+- [x] `scripts/reconcile_yahoo_sweep.py` for bulk regression runs via `yfinance` (kept out of pipeline deps; install via optional `[reconcile]` extra)
 
-- [ ] Cross-check our adjusted close against Yahoo Finance for top 200 names, last 5 years
-- [ ] Tolerance: <0.5% diff on >99% of (symbol, date) pairs
-- [ ] Publish reconciliation report as part of CI
+## Phase 5 - Derived metrics (DONE)
 
-### Open questions for Phase 4
+- [x] Returns at 1d / 5d / 21d / 63d / 126d / 252d horizons plus YTD anchored to first trading day of the calendar year (`pipeline/metrics/returns.py`)
+- [x] Rolling 52-week high / low on `adj_close`, plus `pct_off_52w_high` / `pct_off_52w_low` (`pipeline/metrics/rolling.py`)
+- [x] Average volume 20d / 60d on raw `volume`, average turnover 20d on raw `turnover`
+- [x] `tej-bazaar metrics build (--year YYYY | --all-years)`: writes `metrics/<ex>_<YYYY>.parquet`. Wired into the daily cron after `actions adjust`, before publish.
+- [ ] Distance from VWAP / EMA (deferred; needs an intraday or weighted-bhavcopy input we do not have today)
 
-- NSE corporate actions API requires the same browser-header dance as bhavcopy — need to confirm endpoint stability
-- Some actions (mergers) have no clean numeric ratio; need manual override table
-- Decide: ship adjusted as separate parquet tree or extra columns in same file
+## Phase 6 - SDKs & API handoff (NOT STARTED)
 
-## Phase 5 — Derived metrics
-
-- [ ] Returns (daily, 5d, 20d, YTD)
-- [ ] 52-week high/low
-- [ ] Avg volume (5d, 20d)
-- [ ] Distance from VWAP / EMA
-- [ ] Published as separate `derived/` parquet alongside raw
-
-## Phase 6 — SDKs & API handoff
-
-- [ ] Hand off serving to `tej-api` (REST + auth tiers)
-- [ ] `tej-sdk-py` — thin Python client over API + parquet
-- [ ] `tej-sdk-js` — TypeScript client
+- [ ] Hand off serving to `tej-api` (REST + auth tiers) in a separate repo
+- [ ] `tej-sdk-py`: thin Python client over API + parquet
+- [ ] `tej-sdk-js`: TypeScript client
 
 ---
 
 ## Open questions
 
-- Bhavcopy URL stability — NSE has changed paths historically. Pin specific fetcher + integration test against live URL.
-- BSE bhavcopy format drift — verify schema across years before backfill.
-- Volume/turnover units — Bhavcopy reports paise vs rupees inconsistently. Lock units in transform layer.
-- Delisted symbols — Bhavcopy includes them on their last trading day. Decide retention policy.
-- Holiday calendar source of truth — `exchange_calendars` lib vs scraping NSE holiday master JSON. Lib is easier; scrape is canonical.
+- Bhavcopy URL stability. NSE has changed paths historically. Pin specific fetcher + integration test against live URL.
+- BSE bhavcopy format drift. Verify schema across years before extending backfill.
+- Delisted symbols. Bhavcopy includes them on their last trading day. Decide retention policy.
+- Cron failure visibility. Current `continue-on-error: true` on actions / adjust / metrics steps means a silent stale republish on transient breakage; pair with Phase 3 alerting.

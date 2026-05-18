@@ -65,9 +65,10 @@ jobs:
 
       - name: Build symbol history
         # Walks all bhavcopy years on disk and emits per-ISIN symbol intervals.
-        # Must run BEFORE `actions adjust` because the back-adjust step uses
-        # symbol-history to resolve stale action ISINs (post-merger or
-        # pre-split tickers that NSE still tags to legacy ISINs).
+        # Standalone artifact for downstream consumers (e.g. tej-api). The
+        # `actions adjust` step uses the same algorithm in-memory from the
+        # price series it already loads, so this step is independent of
+        # adjust and can run in any order around it.
         continue-on-error: true
         run: |
           tej-bazaar symbol-history build \

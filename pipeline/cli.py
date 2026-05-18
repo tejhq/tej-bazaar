@@ -1,14 +1,15 @@
-"""tej-bazaar CLI: fetch, transform, write NSE/BSE bhavcopy as parquet.
+"""tej-bazaar CLI: ingest, adjust, derive, publish NSE/BSE EOD data.
 
 Commands:
     tej-bazaar fetch DATE [--exchange NSE|BSE|both]
     tej-bazaar backfill --from D --to D [--exchange NSE|BSE|both]
     tej-bazaar info [--data-dir PATH]
-    tej-bazaar actions fetch --from D --to D [--exchange NSE|BSE|both]
-    tej-bazaar actions adjust --year YYYY [--exchange NSE|BSE|both]
+    tej-bazaar actions fetch (--year YYYY | --from D --to D) [--exchange NSE|BSE|both]
+    tej-bazaar actions adjust (--year YYYY | --all-years) [--exchange NSE|BSE|both]
     tej-bazaar symbol-history build [--exchange NSE|BSE|both]
-    tej-bazaar metrics build --year YYYY | --all-years [--exchange NSE|BSE|both]
+    tej-bazaar metrics build (--year YYYY | --all-years) [--exchange NSE|BSE|both]
     tej-bazaar reconcile --from D --to D (-s SYM1,SYM2 | --top N) [--exchange NSE|BSE]
+    tej-bazaar publish [--repo REPO] [--data-dir PATH] [--dry-run]
     tej-bazaar version
 """
 
@@ -551,10 +552,10 @@ def _adjust_one_year(
 
     prices = pl.concat([pl.read_parquet(p) for p in prices_glob])
 
-        # Back-adjusting prices in `year` must apply EVERY corporate action
-        # whose ex_date > any price date in this slice — i.e. all future
-        # actions across later annual files. Otherwise a 2024 price won't
-        # see a 2025 1:1 bonus and ends up ~2x the true adjusted close.
+    # Back-adjusting prices in `year` must apply EVERY corporate action
+    # whose ex_date > any price date in this slice, i.e. all future
+    # actions across later annual files. Otherwise a 2024 price won't
+    # see a 2025 1:1 bonus and ends up ~2x the true adjusted close.
     future_action_paths = sorted(
         actions_dir.glob(f"{ex.lower()}_*.parquet")
     )

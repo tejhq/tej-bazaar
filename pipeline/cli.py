@@ -55,6 +55,9 @@ from pipeline.fetch import (
 )
 from pipeline.parse import parse_bhavcopy
 from pipeline.publish import DEFAULT_REPO_ID, PublishError, publish_to_hf
+from pipeline.publish_r2 import DEFAULT_BUCKET as DEFAULT_R2_BUCKET
+from pipeline.publish_r2 import PublishError as PublishR2Error
+from pipeline.publish_r2 import publish_to_r2
 from pipeline.push import partition_path, write_partitioned
 from pipeline.reconcile import (
     YahooFetchError,
@@ -869,6 +872,53 @@ def reconcile(
         )
         color = "green" if result.overall_pct_within_tol >= 99.0 else "yellow"
         console.print(Panel.fit(body, border_style=color))
+
+
+@app.command("publish-r2")
+def publish_r2(
+    data_dir: Annotated[
+        Path, typer.Option("--data-dir", help="Local parquet root to push")
+    ] = DEFAULT_OUT_DIR,
+    bucket: Annotated[
+        str, typer.Option("--bucket", help="R2 bucket name")
+    ] = DEFAULT_R2_BUCKET,
+    prefix: Annotated[
+        str,
+        typer.Option("--prefix", help="Optional key prefix inside the bucket"),
+    ] = "",
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="List files, do not upload"),
+    ] = False,
+) -> None:
+    """Push partitioned parquet under DATA_DIR to a Cloudflare R2 bucket.
+
+    Credentials come from env: R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY.
+    Idempotent: files whose remote ETag matches local md5 are skipped.
+    """
+    _banner()
+    try:
+        result = publish_to_r2(
+            data_dir,
+            bucket=bucket,
+            prefix=prefix,
+            dry_run=dry_run,
+        )
+    except PublishR2Error as e:
+        console.print(f"[red]publish-r2 failed[/red] — {e}")
+        raise typer.Exit(code=1) from e
+
+    total_mb = result.total_bytes / 1024 / 1024
+    up_mb = result.uploaded_bytes / 1024 / 1024
+    body = (
+        f"[bold]bucket[/bold]     {result.bucket}\n"
+        f"[bold]files[/bold]      {result.file_count}  ({total_mb:.2f} MB)\n"
+        f"[bold]uploaded[/bold]   {result.uploaded_count}  ({up_mb:.2f} MB)\n"
+        f"[bold]skipped[/bold]    {result.skipped_count}  [dim](etag match)[/dim]"
+    )
+    if dry_run:
+        body += "\n[yellow]dry-run — nothing uploaded[/yellow]"
+    console.print(Panel.fit(body, border_style="green" if not dry_run else "yellow"))
 
 
 @app.command()

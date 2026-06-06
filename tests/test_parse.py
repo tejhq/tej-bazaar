@@ -60,7 +60,7 @@ def test_parse_nse_includes_non_equity_series():
 def test_parse_nse_missing_columns_raises(tmp_path: Path):
     bad = tmp_path / "bad.csv"
     bad.write_text("foo,bar\n1,2\n")
-    with pytest.raises(ValueError, match="missing columns"):
+    with pytest.raises(ValueError, match="schema not recognised"):
         parse_nse(bad)
 
 
@@ -91,3 +91,39 @@ def test_parse_bse_includes_all_series():
     df = parse_bhavcopy(BSE_FIXTURE)
     series = set(df["series"].to_list())
     assert {"A", "T", "X", "Z"}.issubset(series)
+
+
+def test_parse_legacy_nse_pre2012_no_isin_no_trades(tmp_path: Path):
+    # 2010-era NSE bhavcopy: 11 cols, no ISIN, no TOTALTRADES, trailing comma.
+    csv = tmp_path / "cm04JAN2010bhav.csv"
+    csv.write_text(
+        "SYMBOL,SERIES,OPEN,HIGH,LOW,CLOSE,LAST,PREVCLOSE,TOTTRDQTY,TOTTRDVAL,TIMESTAMP,\n"
+        "20MICRONS,EQ,46,47.9,45.7,47.55,47.5,46.05,36282,1719201.35,4-JAN-2010,\n"
+        "RELIANCE,EQ,1100,1120,1090,1110,1108,1095,5000000,5550000000,4-JAN-2010,\n"
+    )
+    df = parse_bhavcopy(csv)
+    assert df.columns == [
+        "date", "symbol", "series", "isin", "name",
+        "open", "high", "low", "close", "last", "prev_close",
+        "volume", "turnover", "trades",
+    ]
+    assert df.schema["date"] == pl.Date
+    assert df["date"].to_list() == [date(2010, 1, 4), date(2010, 1, 4)]
+    assert df["isin"].null_count() == 2
+    assert df["trades"].null_count() == 2
+    assert (df["name"] == "").all()
+    rel = df.filter(pl.col("symbol") == "RELIANCE").row(0, named=True)
+    assert rel["close"] == 1110.0
+    assert rel["volume"] == 5_000_000
+
+
+def test_parse_legacy_nse_post2012_has_isin_and_trades(tmp_path: Path):
+    csv = tmp_path / "cm01JUN2015bhav.csv"
+    csv.write_text(
+        "SYMBOL,SERIES,OPEN,HIGH,LOW,CLOSE,LAST,PREVCLOSE,TOTTRDQTY,TOTTRDVAL,TIMESTAMP,TOTALTRADES,ISIN,\n"
+        "RELIANCE,EQ,900,905,898,902,901.5,899,1234567,1112000000,1-JUN-2015,15000,INE002A01018,\n"
+    )
+    df = parse_bhavcopy(csv)
+    assert df["isin"].to_list() == ["INE002A01018"]
+    assert df["trades"].to_list() == [15000]
+    assert df["date"].to_list() == [date(2015, 6, 1)]

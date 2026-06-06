@@ -25,6 +25,15 @@ NSE_BHAVCOPY_URL = (
     "BhavCopy_NSE_CM_0_0_0_{yyyymmdd}_F_0000.csv.zip"
 )
 
+# Pre-2024-07-08 the NSE EOD bhavcopy used a different URL scheme and a
+# legacy CSV schema (SYMBOL, SERIES, OPEN, ..., TIMESTAMP[, TOTALTRADES, ISIN]).
+# Cut-over to the SEBI CMTS format happened on 2024-07-08.
+NSE_BHAVCOPY_URL_LEGACY = (
+    "https://archives.nseindia.com/content/historical/EQUITIES/"
+    "{yyyy}/{mmm}/cm{dd}{mmm}{yyyy}bhav.csv.zip"
+)
+NSE_LEGACY_CUTOVER = date(2024, 7, 8)
+
 BSE_BHAVCOPY_URL = (
     "https://www.bseindia.com/download/BhavCopy/Equity/"
     "BhavCopy_BSE_CM_0_0_0_{yyyymmdd}_F_0000.CSV"
@@ -78,12 +87,21 @@ def fetch_nse(
 
     dest_dir.mkdir(parents=True, exist_ok=True)
     yyyymmdd = d.strftime("%Y%m%d")
-    csv_name = f"BhavCopy_NSE_CM_0_0_0_{yyyymmdd}_F_0000.csv"
-    csv_path = dest_dir / csv_name
-    if csv_path.exists():
-        return csv_path
 
-    url = NSE_BHAVCOPY_URL.format(yyyymmdd=yyyymmdd)
+    if d < NSE_LEGACY_CUTOVER:
+        mmm = d.strftime("%b").upper()
+        csv_name = f"cm{d.day:02d}{mmm}{d.year}bhav.csv"
+        csv_path = dest_dir / csv_name
+        if csv_path.exists():
+            return csv_path
+        url = NSE_BHAVCOPY_URL_LEGACY.format(yyyy=d.year, mmm=mmm, dd=f"{d.day:02d}")
+    else:
+        csv_name = f"BhavCopy_NSE_CM_0_0_0_{yyyymmdd}_F_0000.csv"
+        csv_path = dest_dir / csv_name
+        if csv_path.exists():
+            return csv_path
+        url = NSE_BHAVCOPY_URL.format(yyyymmdd=yyyymmdd)
+
     body = _http_get_with_retry(url, _NSE_HEADERS, retries, backoff_seconds, timeout, session)
     return _extract_zip_to(body, dest_dir, csv_name)
 

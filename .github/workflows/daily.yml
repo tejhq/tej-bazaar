@@ -2,9 +2,10 @@ name: daily-bhavcopy
 
 on:
   schedule:
-    # 13:30 UTC = 19:00 IST, Mon–Fri. NSE bhavcopy lands ~18:00 IST,
-    # BSE ~18:30 IST, so 19:00 IST gives a safety buffer.
-    - cron: '30 13 * * 1-5'
+    # 14:30 UTC = 20:00 IST, Mon-Fri. NSE bhavcopy lands ~18:00 IST,
+    # BSE ~18:30 IST. 20:00 IST gives a 90-min buffer in case the
+    # archives endpoint lags or NSE delays publication.
+    - cron: '30 14 * * 1-5'
   workflow_dispatch:
     inputs:
       date:
@@ -102,6 +103,20 @@ jobs:
             --exchange both \
             --adjusted-dir data/out/prices_adjusted \
             --out-dir data/out/metrics
+
+      - name: Publish to R2
+        # Primary serving path for tej-api. Idempotent (ETag-dedup), so a
+        # rerun on the same date is cheap. Runs before HF because the API
+        # depends on R2 freshness.
+        if: ${{ hashFiles('data/out/**/*.parquet') != '' }}
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          tej-bazaar publish-r2 \
+            --data-dir data/out \
+            --bucket tej-bazaar
 
       - name: Publish to HF
         if: ${{ hashFiles('data/out/**/*.parquet') != '' }}

@@ -130,14 +130,28 @@ def _parse_legacy_nse(df: pl.DataFrame) -> pl.DataFrame:
     # Legacy bhavcopy carries no instrument name; emit empty string.
     df = df.with_columns(pl.lit("").alias("name"))
 
+    # NSE legacy bhavcopy dates are usually `13-JUL-2020`, but some days
+    # (eg 2020-07-13) ship `13-Jul-20`: 2-digit year + mixed case. Polars
+    # `%Y` parses "20" as year 20 instead of failing, so we normalise the
+    # string first: uppercase the month, expand a trailing 2-digit year to
+    # `20YY` (legacy bhavcopy starts in 1995, so this never collides with
+    # a real 4-digit year).
+    date_normalized = (
+        pl.col("date")
+        .str.to_uppercase()
+        .str.replace(r"^(\d{1,2}-[A-Z]{3})-(\d{2})$", "${1}-20${2}")
+    )
     df = df.with_columns(
-        pl.col("date").str.strptime(pl.Date, "%d-%b-%Y", strict=True),
+        date_normalized.str.strptime(pl.Date, "%d-%b-%Y", strict=False).alias("date"),
         pl.col("symbol").str.strip_chars(),
         pl.col("series").str.strip_chars(),
         pl.col("isin").cast(pl.Utf8, strict=False).str.strip_chars(),
         *[pl.col(c).cast(pl.Float64, strict=False) for c in _NUMERIC_FLOAT],
         *[pl.col(c).cast(pl.Int64, strict=False) for c in _NUMERIC_INT],
     )
+    null_dates = df.filter(pl.col("date").is_null()).height
+    if null_dates:
+        raise ValueError(f"legacy NSE bhavcopy: {null_dates} unparseable date strings")
 
     # Reorder to match modern output for a stable schema.
     return df.select(

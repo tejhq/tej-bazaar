@@ -127,3 +127,25 @@ def test_parse_legacy_nse_post2012_has_isin_and_trades(tmp_path: Path):
     assert df["isin"].to_list() == ["INE002A01018"]
     assert df["trades"].to_list() == [15000]
     assert df["date"].to_list() == [date(2015, 6, 1)]
+
+
+def test_parse_legacy_nse_handles_2digit_year_and_mixed_case(tmp_path: Path):
+    # Regression: NSE 2020-07-13 raw bhavcopy shipped dates as `13-Jul-20`
+    # instead of the usual `13-JUL-2020`. Parser must accept both.
+    csv = tmp_path / "cm13JUL2020bhav.csv"
+    csv.write_text(
+        "SYMBOL,SERIES,OPEN,HIGH,LOW,CLOSE,LAST,PREVCLOSE,TOTTRDQTY,TOTTRDVAL,TIMESTAMP,TOTALTRADES,ISIN,\n"
+        "20MICRONS,EQ,32.85,33.85,31.85,33.45,33.85,32.3,187303,6187285.7,13-Jul-20,1382,INE144J01027,\n"
+    )
+    df = parse_bhavcopy(csv)
+    assert df["date"].to_list() == [date(2020, 7, 13)]
+
+
+def test_parse_legacy_nse_raises_on_unparseable_date(tmp_path: Path):
+    csv = tmp_path / "cm01JUN2015bhav.csv"
+    csv.write_text(
+        "SYMBOL,SERIES,OPEN,HIGH,LOW,CLOSE,LAST,PREVCLOSE,TOTTRDQTY,TOTTRDVAL,TIMESTAMP,TOTALTRADES,ISIN,\n"
+        "RELIANCE,EQ,900,905,898,902,901.5,899,1234567,1112000000,01/06/2015,15000,INE002A01018,\n"
+    )
+    with pytest.raises(ValueError, match="unparseable date"):
+        parse_bhavcopy(csv)

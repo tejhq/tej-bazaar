@@ -49,6 +49,12 @@ jobs:
             --exchange both \
             --out-dir data/out
 
+      # Note: there is no separate year-end compaction step. The
+      # "Refresh current-year rollup" step below runs every weekday and
+      # keeps each year as a single rollup parquet at all times. On Jan 2
+      # the current year flips to the new one, naturally leaving the prior
+      # year frozen as its already-compacted rollup.
+
       - name: Resolve current year (IST)
         id: year
         run: echo "value=$(TZ=Asia/Kolkata date +%Y)" >> "$GITHUB_OUTPUT"
@@ -107,7 +113,9 @@ jobs:
       - name: Publish to R2
         # Primary serving path for tej-api. Idempotent (ETag-dedup), so a
         # rerun on the same date is cheap. Runs before HF because the API
-        # depends on R2 freshness.
+        # depends on R2 freshness. Today's freshly-fetched daily file is
+        # uploaded here; the next step folds it into the year rollup and
+        # the prune-step after that deletes the now-redundant daily key.
         if: ${{ hashFiles('data/out/**/*.parquet') != '' }}
         env:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
@@ -117,6 +125,30 @@ jobs:
           tej-bazaar publish-r2 \
             --data-dir data/out \
             --bucket tej-bazaar
+
+      - name: Refresh current-year rollup
+        # Re-rolls the current year's `<ex>_<YYYY>.parquet` so today's row
+        # is folded in alongside the previously-compacted rows. Then deletes
+        # the now-redundant daily R2 keys for the current year. Without
+        # this, year=YYYY/ accumulates 250+ daily files by year end, which
+        # explodes R2 LIST cost on tej-api OHLCV queries. compact --refresh
+        # pulls BOTH the existing rollup and any daily keys from R2, dedupes
+        # by (symbol, date), and sorts by (symbol, date) so DuckDB row-group
+        # stats let single-symbol queries skip ~99% of bytes.
+        if: ${{ hashFiles('data/out/**/*.parquet') != '' }}
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          YEAR=$(TZ=Asia/Kolkata date +%Y)
+          tej-bazaar compact --year "$YEAR" --exchange both \
+            --from-r2 --refresh --bucket tej-bazaar
+          tej-bazaar publish-r2 --data-dir data/out --bucket tej-bazaar
+          for ex in nse bse; do
+            tej-bazaar r2-prune --prefix "$ex/year=$YEAR/month=" \
+              --bucket tej-bazaar --yes
+          done
 
       - name: Publish to HF
         if: ${{ hashFiles('data/out/**/*.parquet') != '' }}

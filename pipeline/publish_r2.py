@@ -218,3 +218,58 @@ def _put_one(s3: Any, bucket: str, key: str, path: Path, cache: str) -> None:
             ContentType="application/octet-stream",
             CacheControl=cache,
         )
+
+
+@dataclass(frozen=True)
+class PruneResult:
+    bucket: str
+    prefix: str
+    deleted_count: int
+
+
+def prune_r2_prefix(
+    prefix: str,
+    *,
+    bucket: str = DEFAULT_BUCKET,
+    endpoint_url: str | None = None,
+    access_key_id: str | None = None,
+    secret_access_key: str | None = None,
+    dry_run: bool = False,
+    client: Any | None = None,
+) -> PruneResult:
+    """Delete every R2 object whose key begins with `prefix`.
+
+    Used by the year-end compaction flow to remove the now-redundant daily
+    bhavcopy keys after their rollup parquet has been uploaded. The prefix
+    MUST be specific (e.g. `nse/year=2010/month=`) so a typo cannot wipe
+    the bucket.
+    """
+    if not prefix or "/" not in prefix:
+        raise PublishError(
+            f"refusing to prune prefix {prefix!r}: must contain a `/` to scope"
+        )
+
+    s3 = client or _build_client(endpoint_url, access_key_id, secret_access_key)
+    paginator = s3.get_paginator("list_objects_v2")
+    keys: list[str] = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            keys.append(obj["Key"])
+
+    if dry_run or not keys:
+        return PruneResult(bucket=bucket, prefix=prefix, deleted_count=0 if dry_run else 0)
+
+    # Batch delete: S3/R2 caps DeleteObjects at 1000 keys per call.
+    deleted = 0
+    for i in range(0, len(keys), 1000):
+        batch = keys[i : i + 1000]
+        resp = s3.delete_objects(
+            Bucket=bucket,
+            Delete={"Objects": [{"Key": k} for k in batch], "Quiet": True},
+        )
+        errors = resp.get("Errors", [])
+        if errors:
+            raise PublishError(f"delete failed for {len(errors)} keys, first: {errors[0]}")
+        deleted += len(batch)
+
+    return PruneResult(bucket=bucket, prefix=prefix, deleted_count=deleted)

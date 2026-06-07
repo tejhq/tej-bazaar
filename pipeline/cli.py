@@ -19,7 +19,7 @@ import time
 from datetime import date, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated, Any, Optional
 
 import polars as pl
 import typer
@@ -57,7 +57,7 @@ from pipeline.parse import parse_bhavcopy
 from pipeline.publish import DEFAULT_REPO_ID, PublishError, publish_to_hf
 from pipeline.publish_r2 import DEFAULT_BUCKET as DEFAULT_R2_BUCKET
 from pipeline.publish_r2 import PublishError as PublishR2Error
-from pipeline.publish_r2 import publish_to_r2
+from pipeline.publish_r2 import prune_r2_prefix, publish_to_r2
 from pipeline.push import partition_path, write_partitioned
 from pipeline.reconcile import (
     YahooFetchError,
@@ -919,6 +919,235 @@ def publish_r2(
     if dry_run:
         body += "\n[yellow]dry-run — nothing uploaded[/yellow]"
     console.print(Panel.fit(body, border_style="green" if not dry_run else "yellow"))
+
+
+@app.command()
+def compact(
+    year: Annotated[
+        int, typer.Option("--year", help="Past year to compact (do not compact the current year)")
+    ],
+    exchange: Annotated[
+        ExchangeChoice,
+        typer.Option("--exchange", "-e", help="Exchange to compact", case_sensitive=False),
+    ] = ExchangeChoice.BOTH,
+    data_dir: Annotated[
+        Path, typer.Option("--data-dir", help="Local parquet root")
+    ] = DEFAULT_OUT_DIR,
+    delete_dailies: Annotated[
+        bool,
+        typer.Option(
+            "--delete-dailies/--keep-dailies",
+            help="Remove month=*/date=*.parquet files after writing the rollup",
+        ),
+    ] = True,
+    from_r2: Annotated[
+        bool,
+        typer.Option(
+            "--from-r2",
+            help="Download daily files from R2 instead of reading local. Needed on "
+            "ephemeral runners that do not carry historical data on disk.",
+        ),
+    ] = False,
+    bucket: Annotated[
+        str,
+        typer.Option("--bucket", help="R2 bucket name (only used with --from-r2)"),
+    ] = DEFAULT_R2_BUCKET,
+    refresh: Annotated[
+        bool,
+        typer.Option(
+            "--refresh",
+            help="Rebuild the rollup even if it already exists. Use for the "
+            "current year so each new daily file lands in the rollup the same "
+            "evening it is fetched.",
+        ),
+    ] = False,
+) -> None:
+    """Compact one year of daily bhavcopy files into a single rollup parquet.
+
+    Reads `<data-dir>/<ex>/year=YYYY/month=*/date=*.parquet`, writes
+    `<data-dir>/<ex>/year=YYYY/<ex>_<YYYY>.parquet`, then optionally deletes
+    the daily files. Run this once at the start of each new year for the
+    just-closed year, to cut R2 LIST overhead for long-range queries.
+    Idempotent: skips if the rollup already exists.
+    """
+    _banner()
+    table = Table(title=f"compact year={year}", border_style="cyan")
+    table.add_column("Exchange", style="bold")
+    table.add_column("Source", justify="right")
+    table.add_column("Rows", justify="right", style="green")
+    table.add_column("Rollup", style="dim")
+    table.add_column("Action")
+
+    for ex in _exchanges(exchange):
+        year_dir = data_dir / ex.lower() / f"year={year}"
+        rollup_path = year_dir / f"{ex.lower()}_{year}.parquet"
+        if rollup_path.exists() and not refresh:
+            table.add_row(
+                ex, "-", "-", str(rollup_path), "[yellow]rollup exists, skip[/yellow]"
+            )
+            continue
+        # When refreshing, drop the stale rollup before reading inputs so
+        # --from-r2 does not double-count.
+        if rollup_path.exists() and refresh:
+            rollup_path.unlink()
+
+        if from_r2:
+            paths_to_read, n_sources, cleanup = _fetch_year_dailies_from_r2(
+                bucket=bucket, exchange=ex, year=year
+            )
+        else:
+            if not year_dir.exists():
+                table.add_row(ex, "-", "-", "-", "[yellow]no data[/yellow]")
+                continue
+            daily_files = sorted(year_dir.glob("month=*/date=*.parquet"))
+            paths_to_read = [str(p) for p in daily_files]
+            n_sources = len(daily_files)
+            cleanup = lambda: None  # noqa: E731
+
+        try:
+            if not paths_to_read:
+                table.add_row(ex, "0", "0", "-", "[yellow]no dailies[/yellow]")
+                continue
+            df = pl.read_parquet(paths_to_read, hive_partitioning=False)
+            for col in ("year", "month"):
+                if col in df.columns:
+                    df = df.drop(col)
+            # Re-add year + month as REAL columns so queries that filter on
+            # them work across both the rollup (no hive month=/date= dir) and
+            # daily files (where year/month live in the path).
+            df = df.with_columns(
+                pl.col("date").dt.year().alias("year"),
+                pl.col("date").dt.month().alias("month"),
+            )
+            # When --from-r2 includes the existing rollup AND any new daily
+            # files (current-year refresh path), the same (symbol, date) can
+            # show up twice. Drop duplicates so we keep one row per cell.
+            df = df.unique(subset=["symbol", "date"], keep="first")
+            # Sort by (symbol, date) so parquet row-group min/max stats on
+            # `symbol` cluster tightly. Single-symbol OHLCV queries can then
+            # skip every row group whose symbol range excludes the target,
+            # turning a ~30 MB-per-year scan into ~50 kB per year.
+            df = df.sort(["symbol", "date"])
+            rollup_path.parent.mkdir(parents=True, exist_ok=True)
+            df.write_parquet(rollup_path, compression="zstd")
+        finally:
+            cleanup()
+
+        action = "[green]wrote rollup[/green]"
+        if delete_dailies and not from_r2:
+            for p in year_dir.glob("month=*/date=*.parquet"):
+                p.unlink()
+            for month_dir in year_dir.glob("month=*"):
+                try:
+                    month_dir.rmdir()
+                except OSError:
+                    pass
+            action += " [dim]+ deleted local dailies[/dim]"
+        table.add_row(
+            ex, f"{n_sources}" if not from_r2 else f"{n_sources} (r2)",
+            f"{df.height:,}", str(rollup_path), action,
+        )
+
+    console.print(table)
+
+
+def _fetch_year_dailies_from_r2(
+    bucket: str, exchange: str, year: int,
+) -> tuple[list[str], int, Any]:
+    """Download every bhavcopy key for one year + exchange to a temp dir.
+
+    Includes BOTH the rollup (`year=YYYY/<ex>_<YYYY>.parquet`, if present)
+    AND any daily files (`year=YYYY/month=*/date=*.parquet`). The compact
+    caller dedupes by (symbol, date) so the rollup's pre-existing rows are
+    not double-counted when a daily file overlaps. This shape lets the daily
+    cron refresh the current year's rollup safely: today's new daily file
+    plus the existing rollup are merged into the next rollup.
+
+    Returns (list-of-local-paths, count, cleanup-callable). The caller must
+    invoke cleanup() in a finally block.
+    """
+    import tempfile
+    from concurrent.futures import ThreadPoolExecutor
+
+    from pipeline.publish_r2 import _build_client
+
+    s3 = _build_client(None, None, None)
+    year_prefix = f"{exchange.lower()}/year={year}/"
+    keys: list[str] = []
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=year_prefix):
+        for obj in page.get("Contents", []):
+            if obj["Key"].endswith(".parquet"):
+                keys.append(obj["Key"])
+
+    tmp = tempfile.mkdtemp(prefix=f"compact-{exchange.lower()}-{year}-")
+    tmp_path = Path(tmp)
+    local_paths: list[str] = []
+
+    def _download_one(key: str) -> str:
+        # Flatten subdirs into the temp dir; we read them all into one
+        # frame and dedupe, so original layout does not matter.
+        lp = tmp_path / Path(key).name
+        s3.download_file(bucket, key, str(lp))
+        return str(lp)
+
+    if keys:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            local_paths = list(pool.map(_download_one, keys))
+
+    def cleanup() -> None:
+        import shutil
+
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+    return local_paths, len(local_paths), cleanup
+
+
+@app.command("r2-prune")
+def r2_prune(
+    prefix: Annotated[
+        str,
+        typer.Option(
+            "--prefix",
+            help="R2 key prefix to delete recursively (eg `nse/year=2010/month=`)",
+        ),
+    ],
+    bucket: Annotated[
+        str, typer.Option("--bucket", help="R2 bucket name")
+    ] = DEFAULT_R2_BUCKET,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="List would-be-deleted keys without deleting")
+    ] = False,
+    yes: Annotated[
+        bool, typer.Option("--yes", help="Skip the are-you-sure prompt for non-dry-run")
+    ] = False,
+) -> None:
+    """Delete every R2 object under a prefix. Use AFTER compacting a year to
+    drop the now-redundant daily bhavcopy keys.
+
+    Refuses prefixes without a `/` so a typo cannot wipe the bucket.
+    """
+    _banner()
+    if not dry_run and not yes:
+        confirm = typer.confirm(
+            f"This will permanently delete every object under r2://{bucket}/{prefix}. Continue?"
+        )
+        if not confirm:
+            raise typer.Exit(code=1)
+    try:
+        res = prune_r2_prefix(prefix, bucket=bucket, dry_run=dry_run)
+    except PublishR2Error as e:
+        console.print(f"[red]r2-prune failed[/red] {e}")
+        raise typer.Exit(code=1) from e
+    console.print(
+        Panel.fit(
+            f"[bold]bucket[/bold]   {res.bucket}\n"
+            f"[bold]prefix[/bold]   {res.prefix}\n"
+            f"[bold]deleted[/bold]  {res.deleted_count}"
+            + ("\n[yellow]dry-run, nothing deleted[/yellow]" if dry_run else ""),
+            border_style="green" if not dry_run else "yellow",
+        )
+    )
 
 
 @app.command()

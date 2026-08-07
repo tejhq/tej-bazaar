@@ -221,6 +221,91 @@ def _put_one(s3: Any, bucket: str, key: str, path: Path, cache: str) -> None:
 
 
 @dataclass(frozen=True)
+class PullResult:
+    bucket: str
+    listed_count: int
+    downloaded_count: int
+    skipped_count: int
+    downloaded_bytes: int
+
+
+def pull_from_r2(
+    data_dir: Path,
+    *,
+    prefixes: list[str],
+    bucket: str = DEFAULT_BUCKET,
+    endpoint_url: str | None = None,
+    access_key_id: str | None = None,
+    secret_access_key: str | None = None,
+    client: Any | None = None,
+) -> PullResult:
+    """Mirror R2 parquet keys under `prefixes` down into `data_dir`.
+
+    Local-wins: a key whose local file already exists is skipped, whatever
+    its content. In the daily cron the runner starts empty, so anything
+    already on disk was fetched fresh THIS run (today's bhavcopy, the YTD
+    actions file) and is newer than its R2 copy. For local dev the same
+    rule means a pull never clobbers in-progress work.
+
+    Used by the daily cron to seed price history before the all-years
+    derived steps (symbol-history, adjust, metrics). Without this seed the
+    runner sees one day of data and the derived artifacts collapse to a
+    single day.
+    """
+    if not prefixes:
+        raise PublishError("pull_from_r2 requires at least one prefix")
+    for p in prefixes:
+        if not p or "/" not in p:
+            raise PublishError(
+                f"refusing to pull prefix {p!r}: must contain a `/` to scope "
+                "(e.g. `nse/`)"
+            )
+
+    s3 = client or _build_client(endpoint_url, access_key_id, secret_access_key)
+    paginator = s3.get_paginator("list_objects_v2")
+    keys: list[tuple[str, int]] = []
+    for prefix in prefixes:
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                if obj["Key"].endswith(".parquet"):
+                    keys.append((obj["Key"], obj.get("Size", 0)))
+
+    to_get: list[tuple[str, int]] = []
+    skipped = 0
+    for key, size in keys:
+        if (data_dir / key).exists():
+            skipped += 1
+        else:
+            to_get.append((key, size))
+
+    def _get_one(item: tuple[str, int]) -> int:
+        key, size = item
+        local = data_dir / key
+        local.parent.mkdir(parents=True, exist_ok=True)
+        s3.download_file(bucket, key, str(local))
+        return size
+
+    downloaded_bytes = 0
+    if to_get:
+        with ThreadPoolExecutor(max_workers=HEAD_WORKERS) as pool:
+            futs = {pool.submit(_get_one, item): item for item in to_get}
+            for fut in as_completed(futs):
+                key, _size = futs[fut]
+                try:
+                    downloaded_bytes += fut.result()
+                except Exception as e:  # noqa: BLE001 — surface as PublishError below
+                    raise PublishError(f"download failed for {key}: {e}") from e
+
+    return PullResult(
+        bucket=bucket,
+        listed_count=len(keys),
+        downloaded_count=len(to_get),
+        skipped_count=skipped,
+        downloaded_bytes=downloaded_bytes,
+    )
+
+
+@dataclass(frozen=True)
 class PruneResult:
     bucket: str
     prefix: str

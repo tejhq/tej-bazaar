@@ -9,7 +9,9 @@ from pipeline.publish_r2 import (
     DEFAULT_BUCKET,
     PublishError,
     PublishResult,
+    PullResult,
     publish_to_r2,
+    pull_from_r2,
 )
 
 
@@ -174,6 +176,101 @@ def test_publish_uses_default_bucket(tmp_path: Path):
 
     assert result.bucket == DEFAULT_BUCKET
     assert client.put_object.call_args_list[0].kwargs["Bucket"] == DEFAULT_BUCKET
+
+
+# --- pull_from_r2 -----------------------------------------------------------
+
+
+def _mock_pull_client(keys: dict[str, bytes]) -> MagicMock:
+    """Client whose paginator lists `keys` and whose download writes bodies."""
+    client = MagicMock()
+
+    def paginate(Bucket, Prefix):  # noqa: N803
+        matched = [
+            {"Key": k, "Size": len(v)}
+            for k, v in keys.items()
+            if k.startswith(Prefix)
+        ]
+        return [{"Contents": matched}] if matched else [{}]
+
+    client.get_paginator.return_value.paginate.side_effect = paginate
+
+    def download_file(bucket, key, local):
+        Path(local).write_bytes(keys[key])
+
+    client.download_file.side_effect = download_file
+    return client
+
+
+def test_pull_downloads_missing_files(tmp_path: Path):
+    keys = {
+        "nse/year=2025/nse_2025.parquet": b"a" * 100,
+        "nse/year=2026/month=06/date=2026-06-05.parquet": b"b" * 50,
+    }
+    client = _mock_pull_client(keys)
+
+    result = pull_from_r2(tmp_path, prefixes=["nse/"], client=client)
+
+    assert isinstance(result, PullResult)
+    assert result.listed_count == 2
+    assert result.downloaded_count == 2
+    assert result.skipped_count == 0
+    assert result.downloaded_bytes == 150
+    assert (tmp_path / "nse/year=2025/nse_2025.parquet").read_bytes() == b"a" * 100
+
+
+def test_pull_local_wins_skips_existing(tmp_path: Path):
+    keys = {"actions/nse_2026.parquet": b"remote-stale"}
+    local = tmp_path / "actions" / "nse_2026.parquet"
+    local.parent.mkdir(parents=True)
+    local.write_bytes(b"local-fresh")
+    client = _mock_pull_client(keys)
+
+    result = pull_from_r2(tmp_path, prefixes=["actions/"], client=client)
+
+    assert result.downloaded_count == 0
+    assert result.skipped_count == 1
+    assert local.read_bytes() == b"local-fresh"
+    client.download_file.assert_not_called()
+
+
+def test_pull_multiple_prefixes(tmp_path: Path):
+    keys = {
+        "nse/year=2025/nse_2025.parquet": b"n",
+        "bse/year=2025/bse_2025.parquet": b"b",
+        "metrics/nse_2025.parquet": b"m",  # not requested — must be ignored
+    }
+    client = _mock_pull_client(keys)
+
+    result = pull_from_r2(tmp_path, prefixes=["nse/", "bse/"], client=client)
+
+    assert result.listed_count == 2
+    assert (tmp_path / "nse/year=2025/nse_2025.parquet").exists()
+    assert (tmp_path / "bse/year=2025/bse_2025.parquet").exists()
+    assert not (tmp_path / "metrics/nse_2025.parquet").exists()
+
+
+def test_pull_unscoped_prefix_raises(tmp_path: Path):
+    with pytest.raises(PublishError, match="refusing to pull"):
+        pull_from_r2(tmp_path, prefixes=["nse"], client=MagicMock())
+
+
+def test_pull_no_prefixes_raises(tmp_path: Path):
+    with pytest.raises(PublishError, match="at least one prefix"):
+        pull_from_r2(tmp_path, prefixes=[], client=MagicMock())
+
+
+def test_pull_skips_non_parquet_keys(tmp_path: Path):
+    keys = {
+        "nse/year=2025/nse_2025.parquet": b"a",
+        "nse/year=2025/README.md": b"doc",
+    }
+    client = _mock_pull_client(keys)
+
+    result = pull_from_r2(tmp_path, prefixes=["nse/"], client=client)
+
+    assert result.listed_count == 1
+    assert not (tmp_path / "nse/year=2025/README.md").exists()
 
 
 def test_publish_derived_files_get_immutable(tmp_path: Path):

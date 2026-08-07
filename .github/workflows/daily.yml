@@ -22,9 +22,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: pip
@@ -58,6 +58,26 @@ jobs:
       - name: Resolve current year (IST)
         id: year
         run: echo "value=$(TZ=Asia/Kolkata date +%Y)" >> "$GITHUB_OUTPUT"
+
+      - name: Pull price + actions history from R2
+        # Seeds the runner with full history BEFORE the all-years derived
+        # steps below. A fresh runner otherwise holds only today's fetch,
+        # so symbol-history / adjust / metrics would collapse to one day
+        # of data and overwrite the full-history artifacts on R2.
+        # Local-wins: today's freshly fetched files are never clobbered.
+        # Derived prefixes (prices_adjusted/, symbol_history/, metrics/)
+        # are NOT pulled — they are rebuilt from scratch every run.
+        # Gated on today's fetch producing price files so holidays keep
+        # skipping the whole publish tail via the hashFiles guards below.
+        if: ${{ hashFiles('data/out/nse/**/*.parquet', 'data/out/bse/**/*.parquet') != '' }}
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          tej-bazaar pull-r2 \
+            --prefix nse/ --prefix bse/ --prefix actions/ \
+            --data-dir data/out --bucket tej-bazaar
 
       - name: Fetch corporate actions (YTD)
         # YTD rolling refresh: overwrites annual <exchange>_<year>.parquet so
@@ -149,16 +169,33 @@ jobs:
             tej-bazaar r2-prune --prefix "$ex/year=$YEAR/month=" \
               --bucket tej-bazaar --yes
           done
+          # Drop the now-redundant LOCAL daily files too (today's fetch +
+          # any pulled from R2): their rows are folded into the rollup
+          # above. Without this the HF mirror below would carry both the
+          # rollup AND the dailies, double-counting those dates for any
+          # consumer that globs the whole year.
+          rm -rf data/out/nse/year="$YEAR"/month=* data/out/bse/year="$YEAR"/month=*
 
       - name: Publish to HF
-        if: ${{ hashFiles('data/out/**/*.parquet') != '' }}
+        # Gate on PRICE files specifically, not any parquet: on a holiday
+        # the YTD actions fetch still writes a parquet, but the pull step
+        # is skipped, so local data/out has no nse/ bse/ rollups. Running
+        # the HF publish then would fire delete-patterns against the
+        # dailies on HF with nothing local to replace them.
+        if: ${{ hashFiles('data/out/nse/**/*.parquet', 'data/out/bse/**/*.parquet') != '' }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_HUB_DISABLE_XET: '1'
         run: |
+          # delete-patterns: local data/out holds rollup-per-year only (the
+          # refresh step above folded + removed dailies), so any daily file
+          # still on HF is stale and double-counts its date. Deleting the
+          # month= globs converges the HF repo to the rollup layout.
           tej-bazaar publish \
             --repo tejhq/indian-markets \
             --data-dir data/out \
+            --delete-pattern "nse/year=*/month=*" \
+            --delete-pattern "bse/year=*/month=*" \
             -m "daily: ${{ steps.date.outputs.value }} NSE+BSE + actions + adjusted + symbol-history + metrics"
 
       - name: Summary

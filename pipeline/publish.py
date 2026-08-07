@@ -37,12 +37,18 @@ def publish_to_hf(
     commit_message: str | None = None,
     dry_run: bool = False,
     api: HfApi | None = None,
+    delete_patterns: list[str] | None = None,
 ) -> PublishResult:
     """Push parquet files under `data_dir` to HF dataset repo `repo_id`.
 
     - Token resolves from arg → HF_TOKEN env. Raises if neither set (unless dry_run).
     - Creates the repo with `exist_ok=True` if missing.
     - Uploads only `*.parquet` files; HF dedupes by content hash.
+    - `delete_patterns` removes remote files matching the globs that are not
+      part of this upload. The daily cron passes the `year=*/month=*` daily
+      globs so the repo converges to rollup-per-year once a year is
+      compacted; without it the stale dailies would sit beside the rollup
+      and double-count those dates for anyone globbing the whole tree.
     """
     if not data_dir.exists():
         raise PublishError(f"data dir {data_dir} does not exist")
@@ -74,6 +80,7 @@ def publish_to_hf(
             repo_id=repo_id,
             repo_type="dataset",
             allow_patterns=["*.parquet"],
+            delete_patterns=delete_patterns,
             commit_message=commit_message
             or f"tej-bazaar: sync {len(files)} parquet files",
         )

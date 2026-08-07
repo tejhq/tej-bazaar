@@ -57,7 +57,7 @@ from pipeline.parse import parse_bhavcopy
 from pipeline.publish import DEFAULT_REPO_ID, PublishError, publish_to_hf
 from pipeline.publish_r2 import DEFAULT_BUCKET as DEFAULT_R2_BUCKET
 from pipeline.publish_r2 import PublishError as PublishR2Error
-from pipeline.publish_r2 import prune_r2_prefix, publish_to_r2
+from pipeline.publish_r2 import prune_r2_prefix, publish_to_r2, pull_from_r2
 from pipeline.push import partition_path, write_partitioned
 from pipeline.reconcile import (
     YahooFetchError,
@@ -338,6 +338,14 @@ def publish(
         bool,
         typer.Option("--dry-run", help="List files, do not upload"),
     ] = False,
+    delete_pattern: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--delete-pattern",
+            help="Remote glob to delete when absent from this upload "
+            "(repeatable, e.g. `nse/year=*/month=*`)",
+        ),
+    ] = None,
 ) -> None:
     """Push partitioned parquet under DATA_DIR to a HuggingFace dataset repo."""
     _banner()
@@ -347,6 +355,7 @@ def publish(
             repo_id=repo,
             commit_message=message,
             dry_run=dry_run,
+            delete_patterns=list(delete_pattern) if delete_pattern else None,
         )
     except PublishError as e:
         console.print(f"[red]publish failed[/red] — {e}")
@@ -919,6 +928,48 @@ def publish_r2(
     if dry_run:
         body += "\n[yellow]dry-run — nothing uploaded[/yellow]"
     console.print(Panel.fit(body, border_style="green" if not dry_run else "yellow"))
+
+
+@app.command("pull-r2")
+def pull_r2(
+    prefix: Annotated[
+        list[str],
+        typer.Option(
+            "--prefix",
+            help="R2 key prefix to mirror down (repeatable, e.g. `--prefix nse/`)",
+        ),
+    ],
+    data_dir: Annotated[
+        Path, typer.Option("--data-dir", help="Local parquet root to pull into")
+    ] = DEFAULT_OUT_DIR,
+    bucket: Annotated[
+        str, typer.Option("--bucket", help="R2 bucket name")
+    ] = DEFAULT_R2_BUCKET,
+) -> None:
+    """Mirror R2 parquet under the given prefixes into DATA_DIR.
+
+    Local-wins: files already present on disk are never overwritten. The
+    daily cron uses this to seed full price + actions history before the
+    all-years derived builds (symbol-history, adjust, metrics), which
+    otherwise see only the single day fetched in that run.
+
+    Credentials come from env: R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY.
+    """
+    _banner()
+    try:
+        result = pull_from_r2(data_dir, prefixes=list(prefix), bucket=bucket)
+    except PublishR2Error as e:
+        console.print(f"[red]pull-r2 failed[/red] — {e}")
+        raise typer.Exit(code=1) from e
+
+    dl_mb = result.downloaded_bytes / 1024 / 1024
+    console.print(Panel.fit(
+        f"[bold]bucket[/bold]       {result.bucket}\n"
+        f"[bold]listed[/bold]       {result.listed_count}\n"
+        f"[bold]downloaded[/bold]   {result.downloaded_count}  ({dl_mb:.2f} MB)\n"
+        f"[bold]skipped[/bold]      {result.skipped_count}  [dim](local wins)[/dim]",
+        border_style="green",
+    ))
 
 
 @app.command()

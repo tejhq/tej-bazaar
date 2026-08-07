@@ -83,6 +83,30 @@ def test_publish_token_from_env(tmp_path: Path, monkeypatch):
     assert cr.call_args.kwargs["token"] == "env-token"
 
 
+def test_publish_delete_patterns_passthrough(tmp_path: Path):
+    _seed_parquets(tmp_path)
+    api = MagicMock()
+    api.upload_folder.return_value = MagicMock(commit_url=None)
+    with patch("pipeline.publish.create_repo"):
+        publish_to_hf(
+            tmp_path,
+            token="t",
+            api=api,
+            delete_patterns=["nse/year=*/month=*", "bse/year=*/month=*"],
+        )
+    kwargs = api.upload_folder.call_args.kwargs
+    assert kwargs["delete_patterns"] == ["nse/year=*/month=*", "bse/year=*/month=*"]
+
+
+def test_publish_delete_patterns_default_none(tmp_path: Path):
+    _seed_parquets(tmp_path)
+    api = MagicMock()
+    api.upload_folder.return_value = MagicMock(commit_url=None)
+    with patch("pipeline.publish.create_repo"):
+        publish_to_hf(tmp_path, token="t", api=api)
+    assert api.upload_folder.call_args.kwargs["delete_patterns"] is None
+
+
 def test_publish_custom_repo_and_message(tmp_path: Path):
     _seed_parquets(tmp_path)
     api = MagicMock()

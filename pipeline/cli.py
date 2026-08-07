@@ -1008,10 +1008,21 @@ def compact(
             if not paths_to_read:
                 table.add_row(ex, "0", "0", "-", "[yellow]no dailies[/yellow]")
                 continue
-            df = pl.read_parquet(paths_to_read, hive_partitioning=False)
-            for col in ("year", "month"):
-                if col in df.columns:
-                    df = df.drop(col)
+            # Read each file on its own and strip year/month BEFORE concat.
+            # The rollup parquet carries year/month as real columns (added
+            # below), while daily files keep them only in the hive path.
+            # Passing that mixed set to a single pl.read_parquet() trips
+            # polars' uniform-schema check ("extra column ... year"), so the
+            # current-year refresh (rollup + new dailies) must normalise
+            # per-file first.
+            frames = []
+            for p in paths_to_read:
+                f = pl.read_parquet(p, hive_partitioning=False)
+                for col in ("year", "month"):
+                    if col in f.columns:
+                        f = f.drop(col)
+                frames.append(f)
+            df = pl.concat(frames, how="vertical_relaxed")
             # Re-add year + month as REAL columns so queries that filter on
             # them work across both the rollup (no hive month=/date= dir) and
             # daily files (where year/month live in the path).

@@ -76,6 +76,7 @@ DEFAULT_ACTIONS_OUT_DIR = Path("data/out/actions")
 DEFAULT_PRICES_ADJUSTED_DIR = Path("data/out/prices_adjusted")
 DEFAULT_SYMBOL_HISTORY_DIR = Path("data/out/symbol_history")
 DEFAULT_METRICS_DIR = Path("data/out/metrics")
+DEFAULT_UNIVERSE_DIR = Path("data/out/universe")
 
 
 class ExchangeChoice(str, Enum):
@@ -1019,6 +1020,61 @@ def export_json(
         f"[bold]actions[/bold]    {res.action_files} files",
         border_style="green",
     ))
+
+
+universe_app = typer.Typer(
+    name="universe",
+    help="Point-in-time liquidity universes (survivorship-bias-free).",
+    no_args_is_help=True,
+)
+app.add_typer(universe_app)
+
+
+@universe_app.command("build")
+def universe_build(
+    exchange: Annotated[
+        ExchangeChoice,
+        typer.Option("--exchange", "-e", help="Exchange to build", case_sensitive=False),
+    ] = ExchangeChoice.BOTH,
+    prices_dir: Annotated[
+        Path,
+        typer.Option("--prices-dir", help="Root of partitioned bhavcopy parquet"),
+    ] = DEFAULT_OUT_DIR,
+    out_dir: Annotated[
+        Path,
+        typer.Option("--out-dir", help="Directory for universe parquet"),
+    ] = DEFAULT_UNIVERSE_DIR,
+    top_n: Annotated[
+        int, typer.Option("--top-n", help="Members kept per rebalance"),
+    ] = 500,
+) -> None:
+    """Monthly top-N by trailing 63-day turnover, one file per exchange.
+
+    Output `<out-dir>/<ex>_liquid.parquet`. Rebuilt from the full price
+    history every run; membership on a rebalance date only uses data up to
+    that date, so delisted names remain in the months they qualified for.
+    """
+    from pipeline.export_json import read_bhavcopy
+    from pipeline.universe import build_universe
+
+    _banner()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for ex in _exchanges(exchange):
+        paths = sorted((prices_dir / ex.lower()).rglob("*.parquet"))
+        if not paths:
+            console.print(f"[red]no bhavcopy parquet under {prices_dir / ex.lower()}[/red]")
+            raise typer.Exit(code=1)
+        uni = build_universe(read_bhavcopy(paths), ex, top_n=top_n)
+        out = out_dir / f"{ex.lower()}_liquid.parquet"
+        uni.write_parquet(out, compression="zstd")
+        n_rb = uni["rebalance_date"].n_unique() if not uni.is_empty() else 0
+        console.print(Panel.fit(
+            f"[bold]exchange[/bold]    {ex}\n"
+            f"[bold]rebalances[/bold]  {n_rb}\n"
+            f"[bold]rows[/bold]        {uni.height}\n"
+            f"[bold]out[/bold]         {out}",
+            border_style="green",
+        ))
 
 
 @app.command("pull-r2")

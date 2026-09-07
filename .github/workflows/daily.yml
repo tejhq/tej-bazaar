@@ -270,6 +270,13 @@ jobs:
             --adjusted-dir data/derived/prices_adjusted \
             --out-dir data/derived/metrics
 
+      - name: Build liquidity universe (all years)
+        run: |
+          tej-bazaar universe build \
+            --exchange both \
+            --prices-dir data/out \
+            --out-dir data/derived/universe
+
       - name: Publish derived to R2
         run: |
           tej-bazaar publish-r2 \

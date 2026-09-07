@@ -105,6 +105,11 @@ adjusted-close layer alongside raw.
 - [x] `tej-bazaar metrics build (--year YYYY | --all-years)`: writes `metrics/<ex>_<YYYY>.parquet`. Wired into the daily cron after `actions adjust`, before publish.
 - [ ] Distance from VWAP / EMA (deferred; needs an intraday or weighted-bhavcopy input we do not have today)
 
+## Phase 5.5 - Liquidity universe (DONE)
+
+- [x] `tej-bazaar universe build`: monthly top-500 by trailing 63-trading-day turnover per exchange, point-in-time symbols/ISINs, delisted names kept. `universe/<ex>_liquid.parquet`, wired into the derived cron job. Served by tej-api `/v1/universe/liquid{100,250,500}?as_of=`.
+- [ ] Real index constituents (NIFTY50/500, SENSEX) from NSE index-change history
+
 ## Phase 6 - SDKs & API handoff (NOT STARTED)
 
 - [ ] Hand off serving to `tej-api` (REST + auth tiers) in a separate repo

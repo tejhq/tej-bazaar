@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import polars as pl
 
+from pipeline.isin_backfill import series_key
+
 _HORIZONS: list[tuple[str, int]] = [
     ("ret_1d", 1),
     ("ret_5d", 5),
@@ -68,12 +70,17 @@ def compute_returns(adjusted: pl.DataFrame) -> pl.DataFrame:
     if adjusted.height == 0:
         return pl.DataFrame(schema=RETURNS_SCHEMA)
 
-    df = adjusted.select(["isin", "date", "symbol", "adj_close"]).sort(
-        ["isin", "date"]
+    # Partition on ISIN, or the symbol when ISIN is missing (legacy rows
+    # that did not survive the 2012 cutover). Null ISINs would otherwise
+    # collapse every such symbol into one series.
+    df = (
+        adjusted.select(["isin", "date", "symbol", "adj_close"])
+        .with_columns(series_key().alias("_key"))
+        .sort(["_key", "date"])
     )
 
     horizon_exprs = [
-        (pl.col("adj_close") / pl.col("adj_close").shift(n).over("isin") - 1.0)
+        (pl.col("adj_close") / pl.col("adj_close").shift(n).over("_key") - 1.0)
         .alias(name)
         for name, n in _HORIZONS
     ]
@@ -84,7 +91,7 @@ def compute_returns(adjusted: pl.DataFrame) -> pl.DataFrame:
     # sorted, which we did above.
     ytd_expr = (
         pl.col("adj_close")
-        / pl.col("adj_close").first().over(["isin", pl.col("date").dt.year()])
+        / pl.col("adj_close").first().over(["_key", pl.col("date").dt.year()])
         - 1.0
     ).alias("ret_ytd")
 

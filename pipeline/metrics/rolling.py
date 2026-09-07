@@ -40,6 +40,8 @@ from __future__ import annotations
 
 import polars as pl
 
+from pipeline.isin_backfill import series_key
+
 WINDOW_52W = 252
 WINDOW_VOL_SHORT = 20
 WINDOW_VOL_LONG = 60
@@ -80,31 +82,32 @@ def compute_rolling(prices_with_adj: pl.DataFrame) -> pl.DataFrame:
     if prices_with_adj.height == 0:
         return pl.DataFrame(schema=ROLLING_SCHEMA)
 
-    df = prices_with_adj.select(
-        ["isin", "date", "symbol", "adj_close", "volume", "turnover"]
-    ).sort(["isin", "date"])
-
-    # `over("isin")` keeps each ISIN's rolling window self-contained, so
-    # the first 252 rows of ISIN B never reach back into ISIN A's tail.
+    # Partition on ISIN, or the symbol when ISIN is missing, so each
+    # instrument's window is self-contained and null ISINs never merge.
+    df = (
+        prices_with_adj.select(["isin", "date", "symbol", "adj_close", "volume", "turnover"])
+        .with_columns(series_key().alias("_key"))
+        .sort(["_key", "date"])
+    )
     return df.with_columns(
         high_52w=pl.col("adj_close")
         .rolling_max(window_size=WINDOW_52W, min_samples=WINDOW_52W)
-        .over("isin"),
+        .over("_key"),
         low_52w=pl.col("adj_close")
         .rolling_min(window_size=WINDOW_52W, min_samples=WINDOW_52W)
-        .over("isin"),
+        .over("_key"),
         avg_vol_20d=pl.col("volume")
         .cast(pl.Float64)
         .rolling_mean(window_size=WINDOW_VOL_SHORT, min_samples=WINDOW_VOL_SHORT)
-        .over("isin"),
+        .over("_key"),
         avg_vol_60d=pl.col("volume")
         .cast(pl.Float64)
         .rolling_mean(window_size=WINDOW_VOL_LONG, min_samples=WINDOW_VOL_LONG)
-        .over("isin"),
+        .over("_key"),
         avg_turnover_20d=pl.col("turnover")
         .cast(pl.Float64)
         .rolling_mean(window_size=WINDOW_TURNOVER, min_samples=WINDOW_TURNOVER)
-        .over("isin"),
+        .over("_key"),
     ).with_columns(
         pct_off_52w_high=(pl.col("adj_close") / pl.col("high_52w") - 1.0),
         pct_off_52w_low=(pl.col("adj_close") / pl.col("low_52w") - 1.0),

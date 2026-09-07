@@ -105,6 +105,23 @@ def _read_bhavcopy_mixed(paths: Iterable[Path | str]) -> pl.DataFrame:
     return pl.concat(frames, how="vertical_relaxed")
 
 
+def _isin_anchors_for(prices_root: Path) -> pl.DataFrame:
+    """Symbol to ISIN map across the legacy cutover, from all years on disk.
+
+    Only (date, symbol, isin) are read, so this is cheap even over 16 years.
+    """
+    from pipeline.isin_backfill import isin_anchors
+
+    files = sorted(prices_root.rglob("*.parquet"))
+    if not files:
+        return pl.DataFrame(schema={"symbol": pl.Utf8, "isin": pl.Utf8})
+    frames = [
+        pl.read_parquet(f, columns=["date", "symbol", "isin"], hive_partitioning=False)
+        for f in files
+    ]
+    return isin_anchors(pl.concat(frames, how="vertical_relaxed"))
+
+
 def _price_years_on_disk(prices_root: Path) -> list[int]:
     """Years present under a per-exchange price tree, rollups included.
 
@@ -575,8 +592,12 @@ def actions_adjust(
         else:
             years = [year]
 
+        anchors = _isin_anchors_for(prices_dir / ex.lower())
+        if not anchors.is_empty():
+            console.print(f"[dim]{ex}: backfilling ISIN for {anchors.height} symbols "
+                          f"continuous across the legacy cutover[/dim]")
         for y in years:
-            _adjust_one_year(ex, y, prices_dir, actions_dir, out_dir, summary)
+            _adjust_one_year(ex, y, prices_dir, actions_dir, out_dir, summary, anchors)
 
     console.print(summary)
 
@@ -588,6 +609,7 @@ def _adjust_one_year(
     actions_dir: Path,
     out_dir: Path,
     summary: Table,
+    anchors: pl.DataFrame | None = None,
 ) -> None:
     prices_glob = list((prices_dir / ex.lower()).rglob(f"year={year}/**/*.parquet"))
     if not prices_glob:
@@ -596,6 +618,10 @@ def _adjust_one_year(
         return
 
     prices = _read_bhavcopy_mixed(prices_glob)
+    if anchors is not None and not anchors.is_empty():
+        from pipeline.isin_backfill import apply_isin_anchors
+
+        prices = apply_isin_anchors(prices, anchors)
 
     # Back-adjusting prices in `year` must apply EVERY corporate action
     # whose ex_date > any price date in this slice, i.e. all future
@@ -685,6 +711,9 @@ def symbol_history_build(
             continue
 
         prices = _read_bhavcopy_mixed(files)
+        from pipeline.isin_backfill import apply_isin_anchors, isin_anchors
+
+        prices = apply_isin_anchors(prices, isin_anchors(prices))
         history = build_symbol_history(prices, ex)
         out_path = out_dir / f"{ex.lower()}.parquet"
         history.write_parquet(out_path)

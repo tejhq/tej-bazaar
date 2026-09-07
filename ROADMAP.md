@@ -103,6 +103,7 @@ adjusted-close layer alongside raw.
 - [x] Rolling 52-week high / low on `adj_close`, plus `pct_off_52w_high` / `pct_off_52w_low` (`pipeline/metrics/rolling.py`)
 - [x] Average volume 20d / 60d on raw `volume`, average turnover 20d on raw `turnover`
 - [x] `tej-bazaar metrics build (--year YYYY | --all-years)`: writes `metrics/<ex>_<YYYY>.parquet`. Wired into the daily cron after `actions adjust`, before publish.
+- [x] ISIN backfill across the 2011/2012 cutover for derived datasets (2026-09-08). Before this, 2010 and 2011 adjusted prices were unadjusted and metrics merged every ISIN-less symbol into one series.
 - [ ] Distance from VWAP / EMA (deferred; needs an intraday or weighted-bhavcopy input we do not have today)
 
 ## Phase 5.5 - Liquidity universe (DONE)

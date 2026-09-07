@@ -30,7 +30,7 @@ This repo is the **ingest pipeline**. [`tej-api`](../tej-api) serves the same pa
 
 ### Coverage notes
 
-NSE and BSE moved to the **SEBI CMTS bhavcopy format** in 2024. The pipeline detects the format per file and parses both the modern CMTS layout and the legacy NSE `SYMBOL/SERIES/TIMESTAMP` layout, which is how NSE coverage reaches back to 2010. Pre-2012 NSE rows carry no ISIN and no per-row trade count because the source never had them; those fields are null rather than invented.
+NSE and BSE moved to the **SEBI CMTS bhavcopy format** in 2024. The pipeline detects the format per file and parses both the modern CMTS layout and the legacy NSE `SYMBOL/SERIES/TIMESTAMP` layout, which is how NSE coverage reaches back to 2010. Pre-2012 NSE rows carry no ISIN and no per-row trade count because the source never had them; those fields are null in the raw parquet rather than invented. Derived datasets (adjusted prices, symbol history, metrics) backfill the ISIN for symbols that traded on both the last legacy day and the first CMTS day, so corporate actions and rolling windows apply correctly back to 2010. Symbols that did not survive the cutover stay ISIN-less and are windowed by symbol.
 
 Legacy BSE files identify instruments by numeric `SC_CODE` with no clean bridge to modern tickers, so BSE starts at the CMTS cutover.
 

@@ -109,7 +109,7 @@ def _price_years_on_disk(prices_root: Path) -> list[int]:
     """Years present under a per-exchange price tree, rollups included.
 
     Globbing `year=*/month=*/*.parquet` misses years that exist only as a
-    compacted rollup (`year=YYYY/<ex>_YYYY.parquet`) — which after the
+    compacted rollup (`year=YYYY/<ex>_YYYY.parquet`), which after the
     daily cron's prune step is EVERY year. Walk all parquet and parse the
     `year=` path segment instead.
     """
@@ -133,7 +133,7 @@ BANNER = r"""
 console = Console()
 app = typer.Typer(
     name="tej-bazaar",
-    help="Free, open EOD market data for India — NSE & BSE.",
+    help="Free, open EOD market data for India, NSE and BSE.",
     add_completion=False,
     rich_markup_mode="rich",
     no_args_is_help=True,
@@ -230,11 +230,11 @@ def fetch(
             try:
                 result = _run_one(ex, d, raw_dir, out_dir, progress, task)
             except BhavcopyNotFoundError as e:
-                console.print(f"[yellow]skip[/yellow] {ex} {d} — {e}")
+                console.print(f"[yellow]skip[/yellow] {ex} {d}: {e}")
                 progress.advance(task)
                 continue
             except BhavcopyFetchError as e:
-                console.print(f"[red]error[/red] {ex} {d} — {e}")
+                console.print(f"[red]error[/red] {ex} {d}: {e}")
                 raise typer.Exit(code=1) from e
             progress.advance(task)
             if result is None:
@@ -310,7 +310,7 @@ def backfill(
                 except BhavcopyFetchError as e:
                     counts[ex]["failed"] += 1
                     console.print(f"  [red]fail[/red] {ex} {d}: {e}")
-                except Exception as e:  # noqa: BLE001 — keep loop alive on any per-day error
+                except Exception as e:  # noqa: BLE001  # keep loop alive on any per-day error
                     counts[ex]["failed"] += 1
                     console.print(f"  [red]error[/red] {ex} {d}: {type(e).__name__}: {e}")
                 progress.update(task, advance=1)
@@ -395,7 +395,7 @@ def publish(
             delete_patterns=list(delete_pattern) if delete_pattern else None,
         )
     except PublishError as e:
-        console.print(f"[red]publish failed[/red] — {e}")
+        console.print(f"[red]publish failed[/red]: {e}")
         raise typer.Exit(code=1) from e
 
     mb = result.total_bytes / 1024 / 1024
@@ -405,7 +405,7 @@ def publish(
         f"[bold]size[/bold]   {mb:.2f} MB"
     )
     if dry_run:
-        body += "\n[yellow]dry-run — nothing uploaded[/yellow]"
+        body += "\n[yellow]dry-run, nothing uploaded[/yellow]"
     elif result.commit_url:
         body += f"\n[dim]commit: {result.commit_url}[/dim]"
     console.print(Panel.fit(body, border_style="green" if not dry_run else "yellow"))
@@ -947,7 +947,7 @@ def publish_r2(
             dry_run=dry_run,
         )
     except PublishR2Error as e:
-        console.print(f"[red]publish-r2 failed[/red] — {e}")
+        console.print(f"[red]publish-r2 failed[/red]: {e}")
         raise typer.Exit(code=1) from e
 
     total_mb = result.total_bytes / 1024 / 1024
@@ -959,7 +959,7 @@ def publish_r2(
         f"[bold]skipped[/bold]    {result.skipped_count}  [dim](etag match)[/dim]"
     )
     if dry_run:
-        body += "\n[yellow]dry-run — nothing uploaded[/yellow]"
+        body += "\n[yellow]dry-run, nothing uploaded[/yellow]"
     console.print(Panel.fit(body, border_style="green" if not dry_run else "yellow"))
 
 
@@ -1011,7 +1011,7 @@ def export_json(
             only=[k.strip() for k in only.split(",") if k.strip()],
         )
     except ExportError as e:
-        console.print(f"[red]export-json failed[/red] — {e}")
+        console.print(f"[red]export-json failed[/red]: {e}")
         raise typer.Exit(code=1) from e
     console.print(Panel.fit(
         f"[bold]out[/bold]        {out_dir}\n"
@@ -1106,7 +1106,7 @@ def pull_r2(
     try:
         result = pull_from_r2(data_dir, prefixes=list(prefix), bucket=bucket)
     except PublishR2Error as e:
-        console.print(f"[red]pull-r2 failed[/red] — {e}")
+        console.print(f"[red]pull-r2 failed[/red]: {e}")
         raise typer.Exit(code=1) from e
 
     dl_mb = result.downloaded_bytes / 1024 / 1024

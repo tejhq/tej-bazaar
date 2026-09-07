@@ -2,7 +2,7 @@
 
 We mirror the on-disk layout (`<exchange>/year=YYYY/month=MM/date=YYYY-MM-DD.parquet`)
 into the HF repo. `upload_folder` is content-hashed server-side, so unchanged
-files are not re-uploaded — making the operation safely idempotent across runs.
+files are not re-uploaded, making the operation safely idempotent across runs.
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ def publish_to_hf(
     tok = token or os.environ.get("HF_TOKEN")
     if not tok:
         raise PublishError(
-            "HF_TOKEN not set — pass --token or export HF_TOKEN before publishing"
+            "HF_TOKEN not set, pass --token or export HF_TOKEN before publishing"
         )
 
     hf = api or HfApi(token=tok)

@@ -47,7 +47,7 @@ def write_partitioned(
 ) -> list[Path]:
     """Write `df` to partitioned parquet under `base_dir`. Returns paths written.
 
-    Splits by `date` column — one parquet file per distinct date. Empty input
+    Splits by `date` column, one parquet file per distinct date. Empty input
     is a no-op (returns []).
     """
     if exchange not in _VALID_EXCHANGES:

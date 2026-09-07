@@ -61,7 +61,7 @@ _BSE_HEADERS = {
 
 
 class BhavcopyNotFoundError(RuntimeError):
-    """Bhavcopy returned 404 — usually non-trading day or not yet published."""
+    """Bhavcopy returned 404, usually non-trading day or not yet published."""
 
 
 class BhavcopyFetchError(RuntimeError):

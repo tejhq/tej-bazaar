@@ -105,7 +105,7 @@ def publish_to_r2(
                 path, key = futs[fut]
                 try:
                     fut.result()
-                except Exception as e:  # noqa: BLE001 — surface as PublishError below
+                except Exception as e:  # noqa: BLE001  # surface as PublishError below
                     raise PublishError(f"upload failed for {key}: {e}") from e
                 uploaded_count += 1
                 uploaded_bytes += path.stat().st_size
@@ -161,7 +161,7 @@ def _object_key(path: Path, data_dir: Path, prefix: str) -> str:
 
 
 def _md5_of(path: Path, chunk: int = 1 << 20) -> str:
-    h = hashlib.md5()  # noqa: S324 — R2 ETag is md5, not a security primitive here
+    h = hashlib.md5()  # noqa: S324  # R2 ETag is md5, not a security primitive here
     with path.open("rb") as f:
         for block in iter(lambda: f.read(chunk), b""):
             h.update(block)
@@ -237,7 +237,7 @@ def _list_etags(s3: Any, bucket: str, prefix: str) -> dict[str, str]:
 def _remote_etag(s3: Any, bucket: str, key: str) -> str | None:
     try:
         resp = s3.head_object(Bucket=bucket, Key=key)
-    except Exception as e:  # noqa: BLE001 — boto raises ClientError; treat any miss as "not present"
+    except Exception as e:  # noqa: BLE001  # boto raises ClientError; treat any miss as "not present"
         msg = str(e)
         if "Not Found" in msg or "NoSuchKey" in msg or "404" in msg:
             return None
@@ -330,7 +330,7 @@ def pull_from_r2(
                 key, _size = futs[fut]
                 try:
                     downloaded_bytes += fut.result()
-                except Exception as e:  # noqa: BLE001 — surface as PublishError below
+                except Exception as e:  # noqa: BLE001  # surface as PublishError below
                     raise PublishError(f"download failed for {key}: {e}") from e
 
     return PullResult(

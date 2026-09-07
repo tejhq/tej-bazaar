@@ -31,7 +31,7 @@ def test_next_trading_day_skips_weekend():
 
 
 def test_trading_days_between_excludes_weekends_and_holidays():
-    # Aug 11–17 2025: Aug 15 = Independence Day (Fri), Aug 16-17 = weekend
+    # Aug 11 to 17 2025: Aug 15 = Independence Day (Fri), Aug 16-17 = weekend
     days = holidays.trading_days_between(date(2025, 8, 11), date(2025, 8, 17), "NSE")
     assert date(2025, 8, 15) not in days  # Independence Day
     assert date(2025, 8, 16) not in days  # Saturday

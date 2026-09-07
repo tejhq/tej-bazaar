@@ -238,7 +238,7 @@ def test_pull_multiple_prefixes(tmp_path: Path):
     keys = {
         "nse/year=2025/nse_2025.parquet": b"n",
         "bse/year=2025/bse_2025.parquet": b"b",
-        "metrics/nse_2025.parquet": b"m",  # not requested — must be ignored
+        "metrics/nse_2025.parquet": b"m",  # not requested, must be ignored
     }
     client = _mock_pull_client(keys)
 

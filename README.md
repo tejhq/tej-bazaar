@@ -1,10 +1,10 @@
 # tej-bazaar
 
-> Free, open EOD data for Indian stock markets — NSE & BSE. Built from official exchange Bhavcopy. Published as partitioned Parquet on HuggingFace.
+> Free, open EOD data for Indian stock markets, NSE and BSE. Built from official exchange Bhavcopy. Published as partitioned Parquet on HuggingFace.
 
 Part of the [TejHQ](https://github.com/tejhq) ecosystem.
 
-> **Status:** NSE + BSE pipelines live. Daily cron publishes to [`tejhq/indian-markets`](https://huggingface.co/datasets/tejhq/indian-markets) at 19:00 IST on trading days. Corporate actions, back-adjusted prices, symbol-history, Yahoo reconciliation, and derived metrics (returns + rolling 52w / 20d / 60d windows) all shipped. See [ROADMAP.md](./ROADMAP.md).
+> **Status:** NSE 2010 to today and BSE 2024-07-08 to today, live. A two-job GitHub Actions cron runs at 20:00 IST on trading days: `prices` folds the day into the year rollup and publishes to R2 and [`tejhq/indian-markets`](https://huggingface.co/datasets/tejhq/indian-markets); `derived` rebuilds corporate actions, symbol history, adjusted prices, metrics and the liquidity universe from full history. Both jobs also pre-render the JSON that `api.tejhq.dev` serves at the edge. See [ROADMAP.md](./ROADMAP.md).
 
 ---
 
@@ -14,34 +14,34 @@ Part of the [TejHQ](https://github.com/tejhq) ecosystem.
 
 - **Source:** NSE/BSE Bhavcopy (official, free, no auth, redistributable)
 - **Format:** Polars-friendly Parquet, Hive-partitioned by date
-- **Latency:** End-of-day, ~6:30 PM IST after market close
-- **License:** Code MIT. Data is exchange-published Bhavcopy — free to redistribute.
+- **Latency:** End-of-day, published by 20:30 IST on trading days
+- **License:** Code MIT. Data is exchange-published Bhavcopy, free to redistribute.
 
-This repo is the **ingest pipeline**. A separate `tej-api` repo will serve the data over REST.
+This repo is the **ingest pipeline**. [`tej-api`](../tej-api) serves the same parquet over REST at `api.tejhq.dev`.
 
 ---
 
 ## Coverage
 
-| Exchange | Series | Instruments | Coverage start |
-|----------|--------|-------------|----------------|
-| NSE Equity | `EQ`, `BE`, `BZ` | ~2,300 / day | 2024-01-01 |
-| BSE Equity | `A`, `B`, `T` | ~2,200 / day | 2024-01-01 |
+| Exchange | Series | Instruments | Coverage |
+|----------|--------|-------------|----------|
+| NSE Equity | `EQ`, `BE`, `BZ` | ~2,300 / day | 2010-01-04 to today, ~4,070 trading days |
+| BSE Equity | `A`, `B`, `T` | ~2,200 / day | 2024-07-08 to today |
 
-### Why 2024-01-01?
+### Coverage notes
 
-NSE and BSE both moved to the new **SEBI CMTS bhavcopy format** around late 2023 / early 2024. NSE's CMTS file (`BhavCopy_NSE_CM_0_0_0_{YYYYMMDD}_F_0000.csv.zip`) starts **2024-01-01** — December 2023 returns 404.
+NSE and BSE moved to the **SEBI CMTS bhavcopy format** in 2024. The pipeline detects the format per file and parses both the modern CMTS layout and the legacy NSE `SYMBOL/SERIES/TIMESTAMP` layout, which is how NSE coverage reaches back to 2010. Pre-2012 NSE rows carry no ISIN and no per-row trade count because the source never had them; those fields are null rather than invented.
 
-Pre-cutover bhavcopies use legacy formats with different filenames and column names. Parsing them needs a separate code path; tracked under [Phase 3.5 in ROADMAP](./ROADMAP.md#phase-35--legacy-historical-data). For now we publish a clean, uniform CMTS-era dataset.
+Legacy BSE files identify instruments by numeric `SC_CODE` with no clean bridge to modern tickers, so BSE starts at the CMTS cutover.
 
 ### Output trees
 
-Five parquet trees are produced and published, each under its own top-level
-prefix on HuggingFace and `data/out/` locally.
+Six parquet trees are produced and published, each under its own top-level
+prefix on R2 and HuggingFace, plus a JSON tree for the API edge.
 
 #### 1. Bhavcopy (`nse/`, `bse/`)
 
-Hive-partitioned by trading date: `<ex>/year=YYYY/month=MM/date=YYYY-MM-DD.parquet`.
+One rollup per exchange per year, `<ex>/year=YYYY/<ex>_YYYY.parquet`, sorted by `(symbol, date)` so single-symbol queries prune to a few row groups. The daily cron fetches one day, folds it into the current year's rollup, and deletes the daily file.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -116,6 +116,33 @@ One file per exchange per calendar year: `metrics/<ex>_<YYYY>.parquet`.
 Rolling windows require a full window of prior history; bootstrap rows are
 null at that horizon rather than computed off a partial window.
 
+#### 6. Liquidity universe (`universe/`)
+
+One file per exchange: `universe/<ex>_liquid.parquet`. Every month, on the
+first trading day, instruments are ranked by trailing 63-trading-day mean
+turnover and the top 500 are kept. Membership uses only data available on
+the rebalance date, so a name that later delisted still appears in the
+months it qualified for. This is a survivorship-bias-free backtest universe.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `exchange` | Utf8 | `NSE` or `BSE` |
+| `rebalance_date` | Date | First trading day of the month |
+| `valid_to` | Date | Day before the next rebalance |
+| `rank` | Int64 | 1 = highest trailing turnover |
+| `symbol`, `isin`, `name` | Utf8 | As in force on `rebalance_date` |
+| `avg_turnover_63d` | Float64 | Trailing mean turnover, rupees |
+
+`liquid100`, `liquid250` and `liquid500` are `rank <= N` filters over the same rows.
+
+#### 7. API edge JSON (`api/v1/`, R2 only)
+
+`tej-bazaar export-json` pre-renders the tej-api free tier as static JSON:
+`api/v1/ohlcv/<ex>/<SYMBOL>.json` (full history per symbol),
+`api/v1/snapshot/<ex>/<DATE>.json` and `api/v1/actions/<SYMBOL>.json`.
+The Cloudflare Worker in front of `api.tejhq.dev` serves and slices these
+directly, so free-tier requests never reach DuckDB. Not mirrored to HuggingFace.
+
 ---
 
 ## Use the data
@@ -128,32 +155,40 @@ from huggingface_hub import hf_hub_download
 
 p = hf_hub_download(
     "tejhq/indian-markets",
-    "nse/year=2025/month=04/date=2025-04-30.parquet",
+    "nse/year=2025/nse_2025.parquet",
     repo_type="dataset",
 )
 df = pl.read_parquet(p)
 ```
 
-Or the whole partition tree with DuckDB:
+Or the whole tree with DuckDB:
 
 ```sql
 SELECT *
-FROM read_parquet('hf://datasets/tejhq/indian-markets/nse/**/*.parquet', hive_partitioning=1)
+FROM read_parquet('hf://datasets/tejhq/indian-markets/nse/**/*.parquet', union_by_name=true)
 WHERE symbol = 'RELIANCE' AND date >= '2025-01-01';
+```
+
+### From R2 (bulk, edge cached)
+
+```bash
+curl -O https://data.tejhq.dev/nse/year=2025/nse_2025.parquet
 ```
 
 ### From local parquet (after running the pipeline yourself)
 
 ```python
 import polars as pl
-df = pl.read_parquet("data/out/nse/year=2025/month=04/date=2025-04-30.parquet")
+df = pl.read_parquet("data/out/nse/year=2025/nse_2025.parquet")
 ```
 
-### Via REST API (Phase 6, separate `tej-api` repo, not live)
+### Via REST API
 
 ```bash
-curl https://api.tejhq.dev/v1/ohlcv?symbol=RELIANCE&from=2025-01-01&to=2025-04-30
+curl "https://api.tejhq.dev/v1/ohlcv/nse/RELIANCE?from=2025-01-01&to=2025-04-30"
 ```
+
+Docs at [tejhq.dev/docs](https://tejhq.dev/docs). Python SDK: `pip install tejhq`.
 
 ---
 
@@ -182,9 +217,15 @@ pip install -e ".[dev]"
 | `tej-bazaar actions adjust --all-years --exchange both` | Re-adjust every year on disk (cron default; needed when future actions land) |
 | `tej-bazaar symbol-history build --exchange both` | Per-ISIN symbol-history intervals across the full price series |
 | `tej-bazaar metrics build --all-years --exchange both` | Returns (1d/5d/21d/63d/126d/252d/YTD) + rolling 52w hi/lo + 20d/60d avg vol + 20d avg turnover |
+| `tej-bazaar universe build --exchange both` | Monthly top-500 by trailing 63-day turnover, point-in-time, one file per exchange |
+| `tej-bazaar export-json --only ohlcv,snapshot` | Pre-render tej-api free-tier JSON under `data/api/api/v1/`; `--snapshot-years all` for a one-time seed |
 | `tej-bazaar reconcile --from D --to D --top 50` | Compare local adjusted closes against Yahoo Finance |
+| `tej-bazaar compact --year YYYY --exchange both --from-r2 --refresh` | Fold daily files into the year rollup on R2, dedupe by `(symbol, date)` |
 | `tej-bazaar publish --dry-run` | List local parquet files; no upload |
 | `tej-bazaar publish --repo tejhq/indian-markets` | Push to HuggingFace (needs `HF_TOKEN`) |
+| `tej-bazaar publish-r2 --data-dir data/out` | Push parquet and JSON to R2, ETag-deduped (needs `R2_ENDPOINT`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`) |
+| `tej-bazaar pull-r2 --prefix nse/ --prefix actions/` | Seed a local `data/out` from R2, local files win |
+| `tej-bazaar r2-prune --prefix nse/year=2026/month=` | Delete a key prefix on R2, refuses bucket-root prefixes |
 | `tej-bazaar info` | Inventory of local parquet on disk |
 | `tej-bazaar version` | Print version |
 
@@ -205,8 +246,10 @@ NSE/BSE Bhavcopy (official EOD, SEBI CMTS format)
   → fetch (HTTP, browser headers, idempotent)
   → parse (CSV → Polars, normalized 14-column schema)
   → transform (filter equity series, dedupe, validate prices)
-  → write (partitioned parquet, zstd, Hive layout)
-  → publish (HuggingFace upload_folder, content-hash dedup)
+  → write (parquet, zstd)
+  → compact (fold into one rollup per exchange per year, sorted by symbol, date)
+  → publish (R2 with ETag dedup, HuggingFace with content-hash dedup)
+  → export-json (per-symbol OHLCV and per-date snapshots for the API edge)
 
 NSE/BSE corporate actions (REST API, BSE scrip-master ISIN lookup)
   → fetch (per-year annual file, idempotent)
@@ -214,7 +257,18 @@ NSE/BSE corporate actions (REST API, BSE scrip-master ISIN lookup)
   → resolve ISIN via symbol-history (handles post-merger ISIN drift)
   → factors (split: fv_to/fv_from, bonus: d/(n+d), dividend: 1 - cash/prev_close)
   → back-adjust (per-ISIN reverse cumprod, polars partition + numpy searchsorted)
+  → metrics (returns, 52w hi/lo, avg volume and turnover)
+  → universe (monthly top-500 by trailing turnover, point-in-time)
 ```
+
+### Daily cron
+
+`.github/workflows/daily.yml`, 20:00 IST on weekdays, two jobs:
+
+- `prices`: fetch today's bhavcopy, publish, refresh the year rollup, prune dailies, export and publish edge JSON, publish to HuggingFace. Skips cleanly on holidays.
+- `derived`: pull full history from R2, refresh corporate actions, rebuild symbol history, adjusted prices, metrics and universe into `data/derived/`, publish that directory only. A failure here publishes nothing stale and fails the run, so GitHub emails on it. Only the NSE corporate-actions website fetch is allowed to fail, falling back to the history already on R2.
+
+Manual runs: `gh workflow run daily-bhavcopy -f date=YYYY-MM-DD`, or `-f from=D -f to=D` to backfill a range. Set the `ALERT_WEBHOOK_URL` secret for Discord or Slack failure pings.
 
 ### Verification vs Yahoo Finance
 
@@ -243,21 +297,21 @@ The pipeline skips market holidays automatically using `exchange_calendars` (NSE
 
 See [ROADMAP.md](./ROADMAP.md) for the full plan.
 
-- [x] **Phase 1** — NSE pipeline (fetch, parse, transform, parquet write, CLI)
-- [x] **Phase 2a** — BSE pipeline (same SEBI CMTS schema; series A/B/T)
-- [x] **Phase 2b** — HuggingFace publish (`tej-bazaar publish`)
-- [x] **Phase 2c** — GitHub Actions cron (19:00 IST weekdays, holiday-aware)
-- [ ] **Phase 3** — S3/R2 mirror, failure alerts (Slack/Discord webhook)
-- [ ] **Phase 3.5** — Legacy historical data (pre-2024 NSE/BSE formats)
-- [x] **Phase 4** - Corporate actions, adjusted close, symbol-change history, Yahoo reconciliation
-- [x] **Phase 5** - Derived metrics (returns, 52w hi/lo, avg vol / turnover)
-- [ ] **Phase 6** - REST API handoff to `tej-api`, Python + JS SDKs
+- [x] **Phase 1**: NSE pipeline (fetch, parse, transform, parquet write, CLI)
+- [x] **Phase 2**: BSE pipeline, HuggingFace publish, GitHub Actions cron
+- [x] **Phase 3**: R2 mirror, split cron with failure alerts, edge JSON export
+- [x] **Phase 3.5**: Legacy NSE format, coverage back to 2010
+- [x] **Phase 3.6**: Per-year rollups sorted by `(symbol, date)`
+- [x] **Phase 4**: Corporate actions, adjusted close, symbol history, Yahoo reconciliation
+- [x] **Phase 5**: Derived metrics (returns, 52w hi/lo, avg volume and turnover)
+- [x] **Phase 5.5**: Point-in-time liquidity universe
+- [ ] **Phase 6**: TypeScript SDK (Python SDK shipped as `tejhq`)
 
 ---
 
 ## Contributing
 
-PRs welcome. If you find data quality issues, missing stocks, or holiday gaps — open an issue.
+PRs welcome. If you find data quality issues, missing stocks, or holiday gaps, open an issue.
 
 ---
 
@@ -277,4 +331,4 @@ TejHQ is building developer-first financial data infrastructure for India.
 - 🤗 [HuggingFace dataset](https://huggingface.co/datasets/tejhq/indian-markets)
 - 💬 Discussions tab for questions
 
-> *Tej — sharp, fast, bright. Just like the data should be.*
+> *Tej: sharp, fast, bright. Just like the data should be.*

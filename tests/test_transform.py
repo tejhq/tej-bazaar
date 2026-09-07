@@ -151,7 +151,7 @@ def test_transform_bse_default_series():
 def test_transform_nse_default_series_via_exchange():
     df = _df([
         _row(symbol="EQ1", series="EQ"),
-        _row(symbol="A1", series="A"),  # BSE series — should drop on NSE
+        _row(symbol="A1", series="A"),  # BSE series, should drop on NSE
     ])
     out = transform(df, exchange="NSE")
     assert out["symbol"].to_list() == ["EQ1"]

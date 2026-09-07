@@ -127,7 +127,7 @@ def main() -> None:
     overall = summarize(stats_list)
 
     lines = [
-        f"# tej-bazaar vs Yahoo Finance — reconciliation report",
+        f"# tej-bazaar vs Yahoo Finance: reconciliation report",
         "",
         f"- Range: **{start} → {end}**",
         f"- Exchange: **{args.exchange}**",

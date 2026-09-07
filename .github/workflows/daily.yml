@@ -12,15 +12,37 @@ on:
         description: 'Trading date YYYY-MM-DD (defaults to today UTC→IST)'
         required: false
         default: ''
+      from:
+        description: 'Backfill start YYYY-MM-DD (with `to`; overrides `date`)'
+        required: false
+        default: ''
+      to:
+        description: 'Backfill end YYYY-MM-DD inclusive'
+        required: false
+        default: ''
 
 concurrency:
   group: daily-bhavcopy
   cancel-in-progress: false
 
+# Two jobs on purpose:
+#   prices  - fetch today's bhavcopy, fold into the year rollup, publish.
+#             Core product. Must be green every trading day.
+#   derived - corp actions, symbol history, adjusted prices, metrics.
+#             Rebuilt from full history, published from its own dir.
+# A derived failure never blocks prices, but it DOES fail the run so
+# GitHub emails on it. No continue-on-error anywhere except the flaky
+# NSE corp-actions website fetch, which falls back to the actions
+# history already on R2.
+
 jobs:
-  fetch-and-publish:
+  prices:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    outputs:
+      date: ${{ steps.date.outputs.value }}
+      year: ${{ steps.year.outputs.value }}
+      traded: ${{ steps.traded.outputs.value }}
     steps:
       - uses: actions/checkout@v5
 
@@ -33,9 +55,12 @@ jobs:
         run: pip install -e .
 
       - name: Resolve trading date (IST)
+        # With from/to set, `date` becomes the range end for labels.
         id: date
         run: |
-          if [ -n "${{ github.event.inputs.date }}" ]; then
+          if [ -n "${{ github.event.inputs.to }}" ]; then
+            D="${{ github.event.inputs.to }}"
+          elif [ -n "${{ github.event.inputs.date }}" ]; then
             D="${{ github.event.inputs.date }}"
           else
             D=$(TZ=Asia/Kolkata date +%Y-%m-%d)
@@ -43,100 +68,42 @@ jobs:
           echo "value=$D" >> "$GITHUB_OUTPUT"
           echo "Trading date: $D"
 
-      - name: Fetch NSE+BSE
-        run: |
-          tej-bazaar fetch "${{ steps.date.outputs.value }}" \
-            --exchange both \
-            --out-dir data/out
-
-      # Note: there is no separate year-end compaction step. The
-      # "Refresh current-year rollup" step below runs every weekday and
-      # keeps each year as a single rollup parquet at all times. On Jan 2
-      # the current year flips to the new one, naturally leaving the prior
-      # year frozen as its already-compacted rollup.
-
       - name: Resolve current year (IST)
         id: year
         run: echo "value=$(TZ=Asia/Kolkata date +%Y)" >> "$GITHUB_OUTPUT"
 
-      - name: Pull price + actions history from R2
-        # Seeds the runner with full history BEFORE the all-years derived
-        # steps below. A fresh runner otherwise holds only today's fetch,
-        # so symbol-history / adjust / metrics would collapse to one day
-        # of data and overwrite the full-history artifacts on R2.
-        # Local-wins: today's freshly fetched files are never clobbered.
-        # Derived prefixes (prices_adjusted/, symbol_history/, metrics/)
-        # are NOT pulled — they are rebuilt from scratch every run.
-        # Gated on today's fetch producing price files so holidays keep
-        # skipping the whole publish tail via the hashFiles guards below.
-        if: ${{ hashFiles('data/out/nse/**/*.parquet', 'data/out/bse/**/*.parquet') != '' }}
-        env:
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - name: Fetch NSE+BSE
+        # Single date by default. A from/to dispatch backfills a range
+        # (holidays skipped); the rollup refresh below folds all of it in.
         run: |
-          tej-bazaar pull-r2 \
-            --prefix nse/ --prefix bse/ --prefix actions/ \
-            --data-dir data/out --bucket tej-bazaar
+          if [ -n "${{ github.event.inputs.from }}" ]; then
+            tej-bazaar backfill \
+              --from "${{ github.event.inputs.from }}" \
+              --to "${{ steps.date.outputs.value }}" \
+              --exchange both \
+              --out-dir data/out
+          else
+            tej-bazaar fetch "${{ steps.date.outputs.value }}" \
+              --exchange both \
+              --out-dir data/out
+          fi
 
-      - name: Fetch corporate actions (YTD)
-        # YTD rolling refresh: overwrites annual <exchange>_<year>.parquet so
-        # the published file stays a single per-year artifact.
-        continue-on-error: true
+      - name: Did anything trade today?
+        # Holiday or bhavcopy not yet published: fetch writes nothing and
+        # every publish step below plus the whole derived job is skipped.
+        id: traded
         run: |
-          tej-bazaar actions fetch \
-            --year "${{ steps.year.outputs.value }}" \
-            --exchange both \
-            --cache-dir data/raw/actions \
-            --out-dir data/out/actions
+          if find data/out/nse data/out/bse -name '*.parquet' 2>/dev/null | grep -q .; then
+            echo "value=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=false" >> "$GITHUB_OUTPUT"
+            echo "No price parquet written for ${{ steps.date.outputs.value }}; holiday or not yet published."
+          fi
 
-      - name: Build symbol history
-        # Walks all bhavcopy years on disk and emits per-ISIN symbol intervals.
-        # Standalone artifact for downstream consumers (e.g. tej-api). The
-        # `actions adjust` step uses the same algorithm in-memory from the
-        # price series it already loads, so this step is independent of
-        # adjust and can run in any order around it.
-        continue-on-error: true
-        run: |
-          tej-bazaar symbol-history build \
-            --exchange both \
-            --prices-dir data/out \
-            --out-dir data/out/symbol_history
-
-      - name: Compute adjusted prices (all years)
-        # Joins bhavcopy + actions into back-adjusted prices for EVERY year
-        # on disk. All-years (not YTD) because a future bonus / split makes
-        # past adjusted closes stale: a 2026 1:1 bonus retroactively halves
-        # the 2024 adj_close for that ISIN. Depends on the symbol-history
-        # step above for ISIN resolution.
-        continue-on-error: true
-        run: |
-          tej-bazaar actions adjust \
-            --all-years \
-            --exchange both \
-            --prices-dir data/out \
-            --actions-dir data/out/actions \
-            --out-dir data/out/prices_adjusted
-
-      - name: Build derived metrics (all years)
-        # Returns + rolling 52w/20d/60d windows. Reads adjusted parquet,
-        # writes data/out/metrics/<ex>_<year>.parquet. Always full history
-        # so rolling windows are seeded; output filtered per-year.
-        continue-on-error: true
-        run: |
-          tej-bazaar metrics build \
-            --all-years \
-            --exchange both \
-            --adjusted-dir data/out/prices_adjusted \
-            --out-dir data/out/metrics
-
-      - name: Publish to R2
-        # Primary serving path for tej-api. Idempotent (ETag-dedup), so a
-        # rerun on the same date is cheap. Runs before HF because the API
-        # depends on R2 freshness. Today's freshly-fetched daily file is
-        # uploaded here; the next step folds it into the year rollup and
-        # the prune-step after that deletes the now-redundant daily key.
-        if: ${{ hashFiles('data/out/**/*.parquet') != '' }}
+      - name: Publish today's daily to R2
+        # Idempotent (ETag-dedup). Uploads today's daily file; the refresh
+        # step folds it into the year rollup and prunes the daily key.
+        if: steps.traded.outputs.value == 'true'
         env:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -146,22 +113,21 @@ jobs:
             --data-dir data/out \
             --bucket tej-bazaar
 
-      - name: Refresh current-year rollup
-        # Re-rolls the current year's `<ex>_<YYYY>.parquet` so today's row
-        # is folded in alongside the previously-compacted rows. Then deletes
-        # the now-redundant daily R2 keys for the current year. Without
-        # this, year=YYYY/ accumulates 250+ daily files by year end, which
-        # explodes R2 LIST cost on tej-api OHLCV queries. compact --refresh
-        # pulls BOTH the existing rollup and any daily keys from R2, dedupes
-        # by (symbol, date), and sorts by (symbol, date) so DuckDB row-group
-        # stats let single-symbol queries skip ~99% of bytes.
-        if: ${{ hashFiles('data/out/**/*.parquet') != '' }}
+      - name: Refresh current-year rollup on R2
+        # compact --refresh --from-r2 pulls the existing rollup + any daily
+        # keys from R2, dedupes by (symbol, date), sorts by (symbol, date)
+        # so DuckDB row-group stats prune ~99% of bytes on single-symbol
+        # queries, and rewrites year=YYYY/<ex>_YYYY.parquet. Then the daily
+        # keys are pruned so each year= prefix stays at exactly one parquet.
+        # There is no separate year-end compaction: on Jan 2 the current
+        # year flips and the prior year is left frozen as its rollup.
+        if: steps.traded.outputs.value == 'true'
         env:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
-          YEAR=$(TZ=Asia/Kolkata date +%Y)
+          YEAR="${{ steps.year.outputs.value }}"
           tej-bazaar compact --year "$YEAR" --exchange both \
             --from-r2 --refresh --bucket tej-bazaar
           tej-bazaar publish-r2 --data-dir data/out --bucket tej-bazaar
@@ -169,48 +135,160 @@ jobs:
             tej-bazaar r2-prune --prefix "$ex/year=$YEAR/month=" \
               --bucket tej-bazaar --yes
           done
-          # Drop the now-redundant LOCAL daily files too (today's fetch +
-          # any pulled from R2): their rows are folded into the rollup
-          # above. Without this the HF mirror below would carry both the
-          # rollup AND the dailies, double-counting those dates for any
-          # consumer that globs the whole year.
+          # Drop the local dailies too: their rows now live in the rollup.
+          # Otherwise the HF publish below would carry rollup AND dailies,
+          # double-counting those dates for anyone who globs the year.
           rm -rf data/out/nse/year="$YEAR"/month=* data/out/bse/year="$YEAR"/month=*
 
-      - name: Publish to HF
-        # Gate on PRICE files specifically, not any parquet: on a holiday
-        # the YTD actions fetch still writes a parquet, but the pull step
-        # is skipped, so local data/out has no nse/ bse/ rollups. Running
-        # the HF publish then would fire delete-patterns against the
-        # dailies on HF with nothing local to replace them.
-        if: ${{ hashFiles('data/out/nse/**/*.parquet', 'data/out/bse/**/*.parquet') != '' }}
+      - name: Publish prices to HF
+        # data/out now holds only the current-year rollups. delete-pattern
+        # converges the HF repo to rollup-only by removing stale dailies.
+        if: steps.traded.outputs.value == 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_HUB_DISABLE_XET: '1'
         run: |
-          # delete-patterns: local data/out holds rollup-per-year only (the
-          # refresh step above folded + removed dailies), so any daily file
-          # still on HF is stale and double-counts its date. Deleting the
-          # month= globs converges the HF repo to the rollup layout.
           tej-bazaar publish \
             --repo tejhq/indian-markets \
             --data-dir data/out \
             --delete-pattern "nse/year=*/month=*" \
             --delete-pattern "bse/year=*/month=*" \
-            -m "daily: ${{ steps.date.outputs.value }} NSE+BSE + actions + adjusted + symbol-history + metrics"
+            -m "daily: ${{ steps.date.outputs.value }} NSE+BSE prices"
 
       - name: Summary
         if: always()
         run: |
           {
-            echo "## Daily run — ${{ steps.date.outputs.value }}"
+            echo "## prices — ${{ steps.date.outputs.value }}"
             echo ""
             files=$(find data/out -name "*.parquet" 2>/dev/null | sort)
             if [ -n "$files" ]; then
-              echo "Parquet files written:"
-              echo '```'
-              echo "$files"
-              echo '```'
+              echo '```'; echo "$files"; echo '```'
             else
-              echo "_No parquet written — likely a holiday or bhavcopy not yet published._"
+              echo "_No parquet written — holiday or bhavcopy not yet published._"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+  derived:
+    needs: prices
+    if: needs.prices.outputs.traded == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install pipeline
+        run: pip install -e .
+
+      - name: Pull price + actions history from R2
+        # Inputs only, into data/out. Includes today's row because the
+        # prices job already refreshed the rollup. Derived outputs go to
+        # data/derived so only freshly built artifacts get published.
+        run: |
+          tej-bazaar pull-r2 \
+            --prefix nse/ --prefix bse/ --prefix actions/ \
+            --data-dir data/out --bucket tej-bazaar
+
+      - name: Fetch corporate actions (YTD)
+        # NSE's corp-actions website API is the one flaky source (anti-bot
+        # header dance). Allowed to fail: adjust then runs on the actions
+        # history pulled from R2 above, at most one day stale.
+        id: actions
+        continue-on-error: true
+        run: |
+          tej-bazaar actions fetch \
+            --year "${{ needs.prices.outputs.year }}" \
+            --exchange both \
+            --cache-dir data/raw/actions \
+            --out-dir data/derived/actions
+
+      - name: Apply fresh actions, or discard partial output
+        run: |
+          if [ "${{ steps.actions.outcome }}" = "success" ]; then
+            mkdir -p data/out/actions
+            cp data/derived/actions/*.parquet data/out/actions/
+          else
+            echo "::warning::corp-actions fetch failed; adjusting with actions history from R2"
+            rm -rf data/derived/actions
+          fi
+
+      - name: Build symbol history
+        run: |
+          tej-bazaar symbol-history build \
+            --exchange both \
+            --prices-dir data/out \
+            --out-dir data/derived/symbol_history
+
+      - name: Compute adjusted prices (all years)
+        # All years, not YTD: a 2026 bonus retroactively rescales every
+        # earlier adj_close for that ISIN.
+        run: |
+          tej-bazaar actions adjust \
+            --all-years \
+            --exchange both \
+            --prices-dir data/out \
+            --actions-dir data/out/actions \
+            --out-dir data/derived/prices_adjusted
+
+      - name: Build derived metrics (all years)
+        run: |
+          tej-bazaar metrics build \
+            --all-years \
+            --exchange both \
+            --adjusted-dir data/derived/prices_adjusted \
+            --out-dir data/derived/metrics
+
+      - name: Publish derived to R2
+        run: |
+          tej-bazaar publish-r2 \
+            --data-dir data/derived \
+            --bucket tej-bazaar
+
+      - name: Publish derived to HF
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_HUB_DISABLE_XET: '1'
+        run: |
+          tej-bazaar publish \
+            --repo tejhq/indian-markets \
+            --data-dir data/derived \
+            -m "daily: ${{ needs.prices.outputs.date }} actions + adjusted + symbol-history + metrics"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## derived — ${{ needs.prices.outputs.date }}"
+            echo ""
+            echo "corp-actions fetch: ${{ steps.actions.outcome }}"
+            echo ""
+            echo '```'; find data/derived -name "*.parquet" 2>/dev/null | sort; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  alert:
+    # Optional webhook (Discord/Slack-compatible JSON). GitHub already emails
+    # the workflow's last committer on scheduled-run failure; this is extra.
+    needs: [prices, derived]
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Post failure
+        env:
+          WEBHOOK: ${{ secrets.ALERT_WEBHOOK_URL }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then
+            echo "ALERT_WEBHOOK_URL not set; skipping webhook"; exit 0
+          fi
+          curl -fsS -X POST -H 'Content-Type: application/json' "$WEBHOOK" -d @- <<JSON
+          {"content":"tej-bazaar daily FAILED for ${{ needs.prices.outputs.date }}: prices=${{ needs.prices.result }} derived=${{ needs.derived.result }} ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}
+          JSON

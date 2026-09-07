@@ -522,3 +522,88 @@ def test_metrics_build_year_uses_prior_years_for_window(tmp_path: Path):
     # Output is filtered to 2025 only (5 rows).
     assert df.height == 5
     assert all(d.year == 2025 for d in df["date"].to_list())
+
+
+# --- mixed rollup/daily reading (regression: ShapeError width 16 vs 14) -----
+
+
+def _write_price_frame(path: Path, dates: list[date], with_year_month: bool):
+    """Minimal bhavcopy-shaped frame; rollups add year/month real columns."""
+    df = pl.DataFrame({
+        "date": dates,
+        "symbol": ["TCS"] * len(dates),
+        "series": ["EQ"] * len(dates),
+        "isin": ["INE467B01029"] * len(dates),
+        "name": ["Tata Consultancy"] * len(dates),
+        "close": [100.0 + i for i in range(len(dates))],
+    })
+    if with_year_month:
+        df = df.with_columns(
+            pl.col("date").dt.year().alias("year"),
+            pl.col("date").dt.month().alias("month"),
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.write_parquet(path)
+
+
+def test_read_bhavcopy_mixed_rollup_and_daily(tmp_path: Path):
+    from pipeline.cli import _read_bhavcopy_mixed
+
+    rollup = tmp_path / "nse" / "year=2025" / "nse_2025.parquet"
+    daily = tmp_path / "nse" / "year=2026" / "month=08" / "date=2026-08-06.parquet"
+    _write_price_frame(rollup, [date(2025, 1, 1), date(2025, 1, 2)], with_year_month=True)
+    _write_price_frame(daily, [date(2026, 8, 6)], with_year_month=False)
+
+    df = _read_bhavcopy_mixed([rollup, daily])
+
+    assert df.height == 3
+    assert "year" not in df.columns
+    assert "month" not in df.columns
+
+
+def test_read_bhavcopy_mixed_uniform_files_still_work(tmp_path: Path):
+    from pipeline.cli import _read_bhavcopy_mixed
+
+    a = tmp_path / "a.parquet"
+    b = tmp_path / "b.parquet"
+    _write_price_frame(a, [date(2026, 8, 5)], with_year_month=False)
+    _write_price_frame(b, [date(2026, 8, 6)], with_year_month=False)
+
+    df = _read_bhavcopy_mixed([a, b])
+    assert df.height == 2
+
+
+def test_price_years_on_disk_sees_rollup_only_years(tmp_path: Path):
+    from pipeline.cli import _price_years_on_disk
+
+    # 2024 exists ONLY as a compacted rollup (post-prune steady state),
+    # 2026 has a daily file. Both years must be discovered.
+    _write_price_frame(
+        tmp_path / "year=2024" / "nse_2024.parquet",
+        [date(2024, 1, 1)], with_year_month=True,
+    )
+    _write_price_frame(
+        tmp_path / "year=2026" / "month=08" / "date=2026-08-06.parquet",
+        [date(2026, 8, 6)], with_year_month=False,
+    )
+
+    assert _price_years_on_disk(tmp_path) == [2024, 2026]
+
+
+def test_symbol_history_build_handles_mixed_tree(tmp_path: Path):
+    prices = tmp_path / "prices"
+    out = tmp_path / "sh"
+    _write_price_frame(
+        prices / "nse" / "year=2025" / "nse_2025.parquet",
+        [date(2025, 1, 1)], with_year_month=True,
+    )
+    _write_price_frame(
+        prices / "nse" / "year=2026" / "month=08" / "date=2026-08-06.parquet",
+        [date(2026, 8, 6)], with_year_month=False,
+    )
+
+    result = runner.invoke(app, [
+        "symbol-history", "build", "--exchange", "NSE",
+        "--prices-dir", str(prices), "--out-dir", str(out),
+    ])
+    assert result.exit_code == 0, result.output

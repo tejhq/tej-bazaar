@@ -19,7 +19,7 @@ import time
 from datetime import date, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Iterable, Optional
 
 import polars as pl
 import typer
@@ -82,6 +82,42 @@ class ExchangeChoice(str, Enum):
     NSE = "NSE"
     BSE = "BSE"
     BOTH = "both"
+
+
+def _read_bhavcopy_mixed(paths: Iterable[Path | str]) -> pl.DataFrame:
+    """Read bhavcopy parquet that may mix daily files and year rollups.
+
+    Rollups carry `year`/`month` as REAL columns (written by `compact` so
+    rollup-only queries can still filter on them) while daily files keep
+    them only in the hive path. Feeding that mixed set to one
+    `pl.read_parquet([...])` or a plain `pl.concat` trips polars'
+    uniform-schema check (SchemaError / ShapeError: width 16 vs 14).
+    Normalise per-file: drop year/month, then concat relaxed.
+    """
+    frames = []
+    for p in paths:
+        f = pl.read_parquet(p, hive_partitioning=False)
+        for col in ("year", "month"):
+            if col in f.columns:
+                f = f.drop(col)
+        frames.append(f)
+    return pl.concat(frames, how="vertical_relaxed")
+
+
+def _price_years_on_disk(prices_root: Path) -> list[int]:
+    """Years present under a per-exchange price tree, rollups included.
+
+    Globbing `year=*/month=*/*.parquet` misses years that exist only as a
+    compacted rollup (`year=YYYY/<ex>_YYYY.parquet`) — which after the
+    daily cron's prune step is EVERY year. Walk all parquet and parse the
+    `year=` path segment instead.
+    """
+    return sorted({
+        int(seg.split("=", 1)[1])
+        for p in prices_root.rglob("*.parquet")
+        for seg in p.parts
+        if seg.startswith("year=")
+    })
 
 
 BANNER = r"""
@@ -530,11 +566,7 @@ def actions_adjust(
 
     for ex in exchanges:
         if all_years:
-            years = sorted({
-                int(p.parent.parent.name.split("=", 1)[1])
-                for p in (prices_dir / ex.lower()).rglob("year=*/month=*/*.parquet")
-                if p.parent.parent.name.startswith("year=")
-            })
+            years = _price_years_on_disk(prices_dir / ex.lower())
             if not years:
                 console.print(f"[yellow]skip[/yellow] {ex}: no bhavcopy parquet under "
                               f"{prices_dir / ex.lower()}")
@@ -562,7 +594,7 @@ def _adjust_one_year(
                       f"{prices_dir / ex.lower()}/year={year}")
         return
 
-    prices = pl.concat([pl.read_parquet(p) for p in prices_glob])
+    prices = _read_bhavcopy_mixed(prices_glob)
 
     # Back-adjusting prices in `year` must apply EVERY corporate action
     # whose ex_date > any price date in this slice, i.e. all future
@@ -651,7 +683,7 @@ def symbol_history_build(
                           f"{prices_dir / ex.lower()}")
             continue
 
-        prices = pl.concat([pl.read_parquet(p) for p in files])
+        prices = _read_bhavcopy_mixed(files)
         history = build_symbol_history(prices, ex)
         out_path = out_dir / f"{ex.lower()}.parquet"
         history.write_parquet(out_path)
@@ -1059,21 +1091,9 @@ def compact(
             if not paths_to_read:
                 table.add_row(ex, "0", "0", "-", "[yellow]no dailies[/yellow]")
                 continue
-            # Read each file on its own and strip year/month BEFORE concat.
-            # The rollup parquet carries year/month as real columns (added
-            # below), while daily files keep them only in the hive path.
-            # Passing that mixed set to a single pl.read_parquet() trips
-            # polars' uniform-schema check ("extra column ... year"), so the
-            # current-year refresh (rollup + new dailies) must normalise
-            # per-file first.
-            frames = []
-            for p in paths_to_read:
-                f = pl.read_parquet(p, hive_partitioning=False)
-                for col in ("year", "month"):
-                    if col in f.columns:
-                        f = f.drop(col)
-                frames.append(f)
-            df = pl.concat(frames, how="vertical_relaxed")
+            # Rollup + daily files mix schemas (see _read_bhavcopy_mixed);
+            # the current-year refresh reads both, so normalise per-file.
+            df = _read_bhavcopy_mixed(paths_to_read)
             # Re-add year + month as REAL columns so queries that filter on
             # them work across both the rollup (no hive month=/date= dir) and
             # daily files (where year/month live in the path).

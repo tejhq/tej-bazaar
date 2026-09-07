@@ -32,28 +32,34 @@
 - [x] Backfill script (`tej-bazaar backfill --from D --to D --exchange both`)
 - [ ] Sample data committed under `data/sample/`
 
-## Phase 3 - Mirror & resilience (NOT STARTED)
+## Phase 3 - Mirror & resilience (PARTIAL)
 
-- [ ] S3/R2 mirror (in addition to HF) for direct parquet download
-- [ ] Health check / failure alerts (cron failures to GitHub issue or Slack/Discord webhook)
+- [x] R2 mirror (`publish_r2.py`) - serves tej-api via Cloudflare R2 + DuckDB httpfs
+- [ ] HF + R2 parity check: nightly diff to flag drift
+- [x] Cron split into `prices` / `derived` jobs (2026-09-08). `continue-on-error` only on the NSE corp-actions website fetch; every other failure fails the run, so GitHub emails on it. Optional `ALERT_WEBHOOK_URL` secret posts to Discord/Slack.
+- [ ] Health check beyond cron (probe R2/HF freshness from outside)
 - [ ] Retry + backoff on transient bhavcopy 5xx (partially in place for fetch; extend to actions + publish)
 - [ ] Source diff check: flag rows that change after publish (late corp action attribution, restatements)
 
-## Phase 3.5 - Legacy historical data (NOT STARTED)
+## Phase 3.5 - Legacy historical data (DONE)
 
-The current pipeline targets the **SEBI CMTS bhavcopy format** (NSE: from 2024-01-01,
-BSE: from ~mid-2023). Pre-cutover bhavcopies use legacy formats with different
-column names and layouts:
+Extended coverage back to 2010 via the SEBI pre-cutover format:
 
-- NSE legacy: `cm{DDMMYY}bhav.csv.zip` (e.g. `cm30APR23bhav.csv.zip`)
-- BSE legacy: `EQ_ISINCODE_{DDMMYY}.zip` containing `EQ{DDMMYY}.CSV`
+- [x] Legacy NSE parser: SYMBOL/SERIES/TIMESTAMP layout, pre-2012 rows tolerate missing ISIN + TOTALTRADES
+- [x] Format detection in `parse.py`: sniff header, dispatch to `_parse_modern` or `_parse_legacy_nse`
+- [x] 2-digit year handling in TIMESTAMP (NSE 2020-07-13 shipped `13-Jul-20` instead of `13-JUL-2020`)
+- [ ] Legacy BSE parser - skipped. Numeric SC_CODE vs alphanumeric modern ticker has no clean bridge; BSE scoped to 2024-07-08+
+- [x] Sanity: 11/11 representative dates 2010-2026 return 200 from tej-api with correct row counts
 
-To extend coverage backward (2010s to 2023):
+## Phase 3.6 - R2 storage shape (DONE)
 
-- [ ] Legacy NSE parser (different columns: SYMBOL, OPEN, HIGH, ...)
-- [ ] Legacy BSE parser
-- [ ] Format detection in `parse.py`: sniff header, dispatch to right parser
-- [ ] Backfill validation against known-good external sources for sanity
+Backfill expanded R2 to ~4500 daily parquets, which destroyed query LIST cost on tej-api. Reshaped:
+
+- [x] `tej-bazaar compact --year YYYY -e <ex>` writes one `year=YYYY/<ex>_<YYYY>.parquet` rollup per year
+- [x] Rollup sorted by `(symbol, date)` so DuckDB row-group stats prune ~99% of bytes on single-symbol queries
+- [x] `--from-r2` + `--refresh` flags so daily cron can rebuild current-year rollup from R2 (rollup + new dailies, dedup by `(symbol, date)`)
+- [x] `tej-bazaar r2-prune --prefix <pfx>` deletes a key prefix safely (refuses bucket-root prefixes)
+- [x] Daily cron extended: publish-r2 → compact --refresh current year → r2-prune day-keys, so each `year=YYYY/` stays at exactly 1 parquet all year round
 
 ## Phase 4 - Corporate actions & adjustments (DONE)
 
@@ -112,4 +118,4 @@ adjusted-close layer alongside raw.
 - Bhavcopy URL stability. NSE has changed paths historically. Pin specific fetcher + integration test against live URL.
 - BSE bhavcopy format drift. Verify schema across years before extending backfill.
 - Delisted symbols. Bhavcopy includes them on their last trading day. Decide retention policy.
-- Cron failure visibility. Current `continue-on-error: true` on actions / adjust / metrics steps means a silent stale republish on transient breakage; pair with Phase 3 alerting.
+- Cron failure visibility: resolved by the prices/derived split. Derived artifacts are built into `data/derived/` and published from there, so a failed step publishes nothing rather than yesterday's files.

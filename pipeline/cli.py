@@ -962,6 +962,65 @@ def publish_r2(
     console.print(Panel.fit(body, border_style="green" if not dry_run else "yellow"))
 
 
+@app.command("export-json")
+def export_json(
+    prices_dir: Annotated[
+        Path, typer.Option("--prices-dir", help="Root of bhavcopy parquet (nse/, bse/)")
+    ] = DEFAULT_OUT_DIR,
+    actions_dir: Annotated[
+        Optional[Path], typer.Option("--actions-dir", help="Directory of actions parquet; omit to skip")
+    ] = None,
+    out_dir: Annotated[
+        Path, typer.Option("--out-dir", help="Output root; files land under <out>/api/v1/...")
+    ] = Path("data/api"),
+    exchange: Annotated[
+        ExchangeChoice,
+        typer.Option("--exchange", "-e", help="Exchange to export", case_sensitive=False),
+    ] = ExchangeChoice.BOTH,
+    snapshot_years: Annotated[
+        str,
+        typer.Option(
+            "--snapshot-years",
+            help="`current` (default), `all`, or comma-separated years. "
+            "Past snapshots never change, so the daily cron only rewrites this year.",
+        ),
+    ] = "current",
+    only: Annotated[
+        str,
+        typer.Option("--only", help="Comma list of ohlcv,snapshot,actions (default all)"),
+    ] = "ohlcv,snapshot,actions",
+) -> None:
+    """Pre-render tej-api free-tier JSON (ohlcv, snapshot, actions) for edge serving."""
+    from pipeline.export_json import ExportError, export_api_json
+
+    _banner()
+    if snapshot_years == "all":
+        years = None
+    elif snapshot_years == "current":
+        years = [date.today().year]
+    else:
+        years = [int(y) for y in snapshot_years.split(",") if y.strip()]
+    try:
+        res = export_api_json(
+            prices_dir=prices_dir,
+            actions_dir=actions_dir,
+            out_dir=out_dir,
+            exchanges=_exchanges(exchange),
+            snapshot_years=years,
+            only=[k.strip() for k in only.split(",") if k.strip()],
+        )
+    except ExportError as e:
+        console.print(f"[red]export-json failed[/red] — {e}")
+        raise typer.Exit(code=1) from e
+    console.print(Panel.fit(
+        f"[bold]out[/bold]        {out_dir}\n"
+        f"[bold]ohlcv[/bold]      {res.ohlcv_files} files\n"
+        f"[bold]snapshot[/bold]   {res.snapshot_files} files\n"
+        f"[bold]actions[/bold]    {res.action_files} files",
+        border_style="green",
+    ))
+
+
 @app.command("pull-r2")
 def pull_r2(
     prefix: Annotated[

@@ -21,8 +21,10 @@ from typing import Any
 
 DEFAULT_BUCKET = "tej-bazaar"
 DEFAULT_PREFIX = ""  # write at bucket root, no nesting
-HEAD_WORKERS = 8
-PUT_WORKERS = 4
+HEAD_WORKERS = 16
+PUT_WORKERS = 8
+PUBLISH_SUFFIXES = {".parquet", ".json"}
+CONTENT_TYPES = {".parquet": "application/octet-stream", ".json": "application/json; charset=utf-8"}
 TODAY_CACHE = "public, max-age=300"
 IMMUTABLE_CACHE = "public, max-age=31536000, immutable"
 
@@ -64,9 +66,9 @@ def publish_to_r2(
     if not data_dir.exists():
         raise PublishError(f"data dir {data_dir} does not exist")
 
-    files = sorted(data_dir.rglob("*.parquet"))
+    files = sorted(p for p in data_dir.rglob("*") if p.suffix in PUBLISH_SUFFIXES)
     if not files:
-        raise PublishError(f"no parquet files under {data_dir}")
+        raise PublishError(f"no parquet/json files under {data_dir}")
     total_bytes = sum(f.stat().st_size for f in files)
 
     if dry_run:
@@ -86,7 +88,7 @@ def publish_to_r2(
     for path in files:
         key = _object_key(path, data_dir, prefix)
         local_md5 = _md5_of(path)
-        cache = _cache_control(path.stem, today)
+        cache = _cache_control(path.stem, today, key)
         plan.append((path, key, local_md5, cache))
 
     needs_upload = _filter_uploads(s3, bucket, plan)
@@ -166,16 +168,16 @@ def _md5_of(path: Path, chunk: int = 1 << 20) -> str:
     return h.hexdigest()
 
 
-def _cache_control(stem: str, today: date_cls) -> str:
-    # File stem is `date=YYYY-MM-DD` for partitioned bhavcopy, or arbitrary
-    # for derived datasets (e.g. `nse_2024`). Only date= files get the
-    # immutable header keyed on the actual date.
-    if not stem.startswith("date="):
-        return IMMUTABLE_CACHE
+def _cache_control(stem: str, today: date_cls, key: str = "") -> str:
+    # `date=YYYY-MM-DD` (partitioned bhavcopy) and bare `YYYY-MM-DD`
+    # (api snapshot json) stems are immutable once the date is past.
+    # Everything else under api/ is rewritten daily (per-symbol ohlcv,
+    # actions), so short-cache it; derived parquet (`nse_2024`) is immutable.
+    raw = stem.split("=", 1)[1] if stem.startswith("date=") else stem
     try:
-        d = date_cls.fromisoformat(stem.split("=", 1)[1])
+        d = date_cls.fromisoformat(raw)
     except ValueError:
-        return IMMUTABLE_CACHE
+        return TODAY_CACHE if key.startswith("api/") else IMMUTABLE_CACHE
     return TODAY_CACHE if d >= today else IMMUTABLE_CACHE
 
 
@@ -215,7 +217,7 @@ def _put_one(s3: Any, bucket: str, key: str, path: Path, cache: str) -> None:
             Bucket=bucket,
             Key=key,
             Body=f,
-            ContentType="application/octet-stream",
+            ContentType=CONTENT_TYPES.get(path.suffix, "application/octet-stream"),
             CacheControl=cache,
         )
 

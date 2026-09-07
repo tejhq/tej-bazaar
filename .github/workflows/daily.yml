@@ -20,6 +20,10 @@ on:
         description: 'Backfill end YYYY-MM-DD inclusive'
         required: false
         default: ''
+      snapshots:
+        description: 'Snapshot JSON years to export: current (default) or all (one-time seed)'
+        required: false
+        default: 'current'
 
 concurrency:
   group: daily-bhavcopy
@@ -140,6 +144,25 @@ jobs:
           # double-counting those dates for anyone who globs the year.
           rm -rf data/out/nse/year="$YEAR"/month=* data/out/bse/year="$YEAR"/month=*
 
+      - name: Export edge JSON (ohlcv + snapshots)
+        # Pull every year's rollup so per-symbol OHLCV JSON carries full
+        # history, then pre-render the free-tier responses the Worker
+        # serves straight from R2. ~11k small files; publish-r2 dedups by
+        # ETag so only symbols that traded today are re-uploaded.
+        if: steps.traded.outputs.value == 'true'
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          tej-bazaar pull-r2 --prefix nse/ --prefix bse/ \
+            --data-dir data/out --bucket tej-bazaar
+          tej-bazaar export-json \
+            --prices-dir data/out --out-dir data/api --exchange both \
+            --only ohlcv,snapshot \
+            --snapshot-years "${{ github.event.inputs.snapshots || 'current' }}"
+          tej-bazaar publish-r2 --data-dir data/api --bucket tej-bazaar
+
       - name: Publish prices to HF
         # data/out now holds only the current-year rollups. delete-pattern
         # converges the HF repo to rollup-only by removing stale dailies.
@@ -252,6 +275,13 @@ jobs:
           tej-bazaar publish-r2 \
             --data-dir data/derived \
             --bucket tej-bazaar
+
+      - name: Export edge JSON (actions)
+        run: |
+          tej-bazaar export-json \
+            --prices-dir data/out --actions-dir data/out/actions \
+            --out-dir data/api --only actions
+          tej-bazaar publish-r2 --data-dir data/api --bucket tej-bazaar
 
       - name: Publish derived to HF
         env:

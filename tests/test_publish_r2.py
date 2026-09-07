@@ -284,3 +284,22 @@ def test_publish_derived_files_get_immutable(tmp_path: Path):
 
     cc = client.put_object.call_args_list[0].kwargs["CacheControl"]
     assert "immutable" in cc
+
+
+def test_large_plan_uses_prefix_listing(tmp_path: Path, monkeypatch):
+    from pipeline import publish_r2 as mod
+    monkeypatch.setattr(mod, "LIST_THRESHOLD", 1)
+    root = tmp_path / "api"
+    (root / "v1/ohlcv/nse").mkdir(parents=True)
+    a = root / "v1/ohlcv/nse/A.json"; a.write_text('{"data":[]}')
+    b = root / "v1/ohlcv/nse/B.json"; b.write_text('{"data":[1]}')
+    a_md5 = hashlib.md5(a.read_bytes()).hexdigest()
+    client = MagicMock()
+    page = {"Contents": [{"Key": "api/v1/ohlcv/nse/A.json", "ETag": f'"{a_md5}"'}, {"Key": "api/v1/ohlcv/nse/B.json", "ETag": '"stale"'}]}
+    client.get_paginator.return_value.paginate.return_value = [page]
+    res = publish_to_r2(root, bucket="b", prefix="api", client=client)
+    assert res.uploaded_count == 1 and res.skipped_count == 1
+    client.head_object.assert_not_called()
+    client.get_paginator.return_value.paginate.assert_called_once_with(Bucket="b", Prefix="api/v1/ohlcv/nse/")
+    put_keys = [c.kwargs["Key"] for c in client.put_object.call_args_list]
+    assert put_keys == ["api/v1/ohlcv/nse/B.json"]

@@ -42,7 +42,7 @@ concurrency:
 jobs:
   prices:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     outputs:
       date: ${{ steps.date.outputs.value }}
       year: ${{ steps.year.outputs.value }}
@@ -315,7 +315,7 @@ jobs:
     # Optional webhook (Discord/Slack-compatible JSON). GitHub already emails
     # the workflow's last committer on scheduled-run failure; this is extra.
     needs: [prices, derived]
-    if: failure()
+    if: failure() || cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:

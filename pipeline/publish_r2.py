@@ -181,12 +181,27 @@ def _cache_control(stem: str, today: date_cls, key: str = "") -> str:
     return TODAY_CACHE if d >= today else IMMUTABLE_CACHE
 
 
+LIST_THRESHOLD = 200  # above this many objects, one prefix listing beats per-key HEADs
+
+
 def _filter_uploads(
     s3: Any,
     bucket: str,
     plan: list[tuple[Path, str, str, str]],
 ) -> list[tuple[Path, str, str, str]]:
-    """Return only the plan entries whose ETag does not already match local md5."""
+    """Return only the plan entries whose ETag does not already match local md5.
+
+    Small plans HEAD each key in parallel. Large plans (the ~15k edge JSON
+    files) list the bucket under the keys' common prefix instead: 1,000
+    ETags per request rather than one.
+    """
+    if len(plan) > LIST_THRESHOLD:
+        remote_etags = _list_etags(s3, bucket, _common_prefix([key for _p, key, _m, _c in plan]))
+        return [
+            (path, key, md5, cache)
+            for path, key, md5, cache in plan
+            if remote_etags.get(key) != md5
+        ]
     needs: list[tuple[Path, str, str, str]] = []
     with ThreadPoolExecutor(max_workers=HEAD_WORKERS) as pool:
         futs = {pool.submit(_remote_etag, s3, bucket, key): (path, key, md5, cache)
@@ -197,6 +212,26 @@ def _filter_uploads(
             if remote is None or remote != md5:
                 needs.append((path, key, md5, cache))
     return needs
+
+
+def _common_prefix(keys: list[str]) -> str:
+    """Longest common key prefix, cut back to a `/` boundary."""
+    if not keys:
+        return ""
+    pfx = os.path.commonprefix(keys)
+    return pfx[: pfx.rfind("/") + 1] if "/" in pfx else ""
+
+
+def _list_etags(s3: Any, bucket: str, prefix: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    try:
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                out[obj["Key"]] = obj.get("ETag", "").strip('"')
+    except Exception as e:  # noqa: BLE001
+        raise PublishError(f"list_objects failed for prefix {prefix!r}: {e}") from e
+    return out
 
 
 def _remote_etag(s3: Any, bucket: str, key: str) -> str | None:

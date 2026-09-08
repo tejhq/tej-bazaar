@@ -47,7 +47,7 @@ No broker, no auth, no scraping. The same data is served at [api.tejhq.dev](http
 
 | Exchange | Series | Instruments | Coverage |
 |----------|--------|-------------|----------|
-| NSE | `EQ`, `BE`, `BZ` | ~2,300 / day | 2010-01-04 to today, ~4,070 trading days |
+| NSE | `EQ`, `BE`, `BZ` | ~2,300 / day | 2010-01-04 to today, ~4,100 trading days |
 | BSE | `A`, `B`, `T` | ~2,200 / day | 2024-07-08 to today |
 
 NSE and BSE both moved to the SEBI CMTS bhavcopy format on 2024-07-08. The pipeline parses both the modern CMTS layout and the legacy NSE layout, which is how NSE reaches back to 2010. Legacy BSE files identify instruments by numeric scrip code with no clean bridge to modern tickers, so BSE starts at the cutover.
@@ -102,10 +102,10 @@ One file per exchange per year. Every raw bhavcopy column, plus:
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `adj_factor_cumulative` | float64 | Product of factors of all actions with `ex_date` after this row, per ISIN. `1.0` when none. |
+| `adj_factor_cumulative` | float64 | Product of factors of all actions with `ex_date` after this row, per instrument chain. `1.0` when none. |
 | `adj_close` | float64 | `close * adj_factor_cumulative`. Continuous through splits, bonuses and dividends. |
 
-Dividend factor follows the NSE convention, `(prev_close - cash) / prev_close`; several payouts on one ex date are summed. Demergers and rights are not scaled, which is where this series and Yahoo Finance differ by design. Reconciled at 89% within 1% of Yahoo Finance adjusted close across 25,000 daily comparisons; the remaining gap is mostly Yahoo's different dividend formula.
+Dividend factor follows the NSE convention, `(prev_close - cash) / prev_close`, with `prev_close` taken from the session before the ex date across the full history; several payouts on one ex date are summed. Demergers, rights, buybacks and mergers are not scaled, which is where this series and Yahoo Finance differ by design. Reconciled at 96.88% within 1% of Yahoo Finance adjusted close across 25,329 daily comparisons on 48 symbols; the two outliers, TRENT and ITC, are Yahoo-side (a bonus applied on the wrong date, a demerger scaled into history).
 
 ### 4. `symbol_history/`: which symbol an ISIN traded under, and when
 
@@ -191,7 +191,7 @@ actions = load_dataset("tejhq/indian-markets", "actions")
 curl "https://api.tejhq.dev/v1/ohlcv/nse/RELIANCE?from=2024-01-01&to=2024-12-31"
 ```
 
-No key needed for prices, snapshots and actions. Adjusted prices and symbol history need a free key from [tejhq.dev/keys](https://tejhq.dev/keys). Metrics, universe, batch and resolve are on the Pro tier.
+No key needed for prices, snapshots, actions and the pipeline status at `/v1/status`. Adjusted prices and symbol history need a free key from [tejhq.dev/keys](https://tejhq.dev/keys). Metrics, universe, batch, resolve and the screener are on the Pro tier.
 
 ## Caveats
 

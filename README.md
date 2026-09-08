@@ -25,7 +25,7 @@ This repo is the **ingest pipeline**. [`tej-api`](../tej-api) serves the same pa
 
 | Exchange | Series | Instruments | Coverage |
 |----------|--------|-------------|----------|
-| NSE Equity | `EQ`, `BE`, `BZ` | ~2,300 / day | 2010-01-04 to today, ~4,070 trading days |
+| NSE Equity | `EQ`, `BE`, `BZ` | ~2,300 / day | 2010-01-04 to today, ~4,100 trading days |
 | BSE Equity | `A`, `B`, `T` | ~2,200 / day | 2024-07-08 to today |
 
 ### Coverage notes
@@ -229,13 +229,14 @@ pip install -e ".[dev]"
 | `tej-bazaar backfill --from D --to D` | Range; skips weekends + NSE/BSE holidays automatically |
 | `tej-bazaar backfill --from D --to D --exchange both` | Range, both exchanges |
 | `tej-bazaar actions fetch --year 2024 --exchange both` | Pull NSE+BSE corporate actions for a calendar year (annual rolling file) |
+| `tej-bazaar actions reparse --actions-dir data/out/actions` | Rewrite stored action files in place, re-extracting cash, ratio and face values from `raw_subject`; idempotent, the cron runs it before adjust |
 | `tej-bazaar actions adjust --year 2024 --exchange NSE` | Compute back-adjusted prices from bhavcopy + actions (single year) |
 | `tej-bazaar actions adjust --all-years --exchange both` | Re-adjust every year on disk (cron default; needed when future actions land) |
 | `tej-bazaar symbol-history build --exchange both` | Per-ISIN symbol-history intervals across the full price series |
-| `tej-bazaar metrics build --all-years --exchange both` | Returns (1d/5d/21d/63d/126d/252d/YTD) + rolling 52w hi/lo + 20d/60d avg vol + 20d avg turnover |
+| `tej-bazaar metrics build --all-years --exchange both` | Returns (1d/5d/21d/63d/126d/252d/YTD) + rolling 52w hi/lo + 20d/60d avg vol + 20d avg turnover; also writes `<ex>_latest.parquet`, and monthly `<ex>_YYYY-MM.parquet` slices with `--slices-dir` |
 | `tej-bazaar universe build --exchange both` | Monthly top-500 by trailing 63-day turnover, point-in-time, one file per exchange |
 | `tej-bazaar export-json --only ohlcv,snapshot` | Pre-render tej-api free-tier JSON under `data/api/api/v1/`; `--snapshot-years all` for a one-time seed |
-| `tej-bazaar reconcile --from D --to D --top 50` | Compare local adjusted closes against Yahoo Finance |
+| `tej-bazaar reconcile --from D --to D --top 50` | Compare local adjusted closes against Yahoo Finance via `yfinance` (needs the `reconcile` extra) |
 | `tej-bazaar compact --year YYYY --exchange both --from-r2 --refresh` | Fold daily files into the year rollup on R2, dedupe by `(symbol, date)` |
 | `tej-bazaar publish --dry-run` | List local parquet files; no upload |
 | `tej-bazaar publish --repo tejhq/indian-markets` | Push to HuggingFace (needs `HF_TOKEN`) |
@@ -243,6 +244,7 @@ pip install -e ".[dev]"
 | `tej-bazaar publish-r2 --data-dir data/out` | Push parquet and JSON to R2, ETag-deduped (needs `R2_ENDPOINT`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`) |
 | `tej-bazaar pull-r2 --prefix nse/ --prefix actions/` | Seed a local `data/out` from R2, local files win |
 | `tej-bazaar r2-prune --prefix nse/year=2026/month=` | Delete a key prefix on R2, refuses bucket-root prefixes |
+| `tej-bazaar status write --stage prices --trading-date D --out data/status/api/v1/status.json` | Write the pipeline freshness record served keyless at `api.tejhq.dev/v1/status`; `--stage derived` adds `derived_published_at` |
 | `tej-bazaar info` | Inventory of local parquet on disk |
 | `tej-bazaar version` | Print version |
 
@@ -271,9 +273,10 @@ NSE/BSE Bhavcopy (official EOD, SEBI CMTS format)
 NSE/BSE corporate actions (REST API, BSE scrip-master ISIN lookup)
   → fetch (per-year annual file, idempotent)
   → parse (classify split / bonus / dividend / rights / merger)
+  → reparse (re-extract cash, ratio and face values from raw_subject; same-day payouts summed)
   → resolve ISIN via symbol-history (handles post-merger ISIN drift)
-  → factors (split: fv_to/fv_from, bonus: d/(n+d), dividend: 1 - cash/prev_close)
-  → back-adjust (per-ISIN reverse cumprod, polars partition + numpy searchsorted)
+  → factors (split: fv_to/fv_from, bonus: d/(n+d), dividend: 1 - cash/prev_close with prev_close from full history; rights, buyback, demerger, merger: 1.0)
+  → back-adjust (per instrument chain reverse cumprod, polars partition + numpy searchsorted)
   → metrics (returns, 52w hi/lo, avg volume and turnover)
   → universe (monthly top-500 by trailing turnover, point-in-time)
 ```
@@ -282,28 +285,33 @@ NSE/BSE corporate actions (REST API, BSE scrip-master ISIN lookup)
 
 `.github/workflows/daily.yml`, 20:00 IST on weekdays, two jobs:
 
-- `prices`: fetch today's bhavcopy, publish, refresh the year rollup, prune dailies, export and publish edge JSON, publish to HuggingFace. Skips cleanly on holidays.
-- `derived`: pull full history from R2, refresh corporate actions, rebuild symbol history, adjusted prices, metrics and universe into `data/derived/`, publish that directory only. A failure here publishes nothing stale and fails the run, so GitHub emails on it. Only the NSE corporate-actions website fetch is allowed to fail, falling back to the history already on R2.
+- `prices`: fetch today's bhavcopy, publish, refresh the year rollup, prune dailies, export and publish edge JSON, write `api/v1/status.json`, publish to HuggingFace with the dataset card (`--card hf/README.md`). Skips cleanly on holidays.
+- `derived`: pull full history from R2, refresh corporate actions, rebuild symbol history, reparse actions, rebuild adjusted prices, metrics (year files, `_latest`, and R2-only month slices under `data/api/metrics`) and universe into `data/derived/`, publish that directory only, then rewrite `status.json` with `derived_published_at`. A failure here publishes nothing stale and fails the run, so GitHub emails on it. Only the NSE corporate-actions website fetch is allowed to fail, falling back to the history already on R2.
 
 Manual runs: `gh workflow run daily-bhavcopy -f date=YYYY-MM-DD`, or `-f from=D -f to=D` to backfill a range. Set the `ALERT_WEBHOOK_URL` secret for Discord or Slack failure pings.
 
 ### Verification vs Yahoo Finance
 
 Adjusted closes for the top 50 NSE names (by mean daily turnover) over
-2024-01-01 → 2026-05-06 reconcile against Yahoo's `Adj Close` as follows:
+2024-01-01 → 2026-05-06 reconcile against Yahoo's `Adj Close` as follows
+(full run in [reconcile_report.md](./reconcile_report.md), 2026-09-08):
 
-- **89% of row-comparisons within ±1%** (~25,000 daily closes across 48 symbols)
-- The residual gap is driven by methodology differences in dividend
-  adjustment: NSE official uses `(prev_close - cash) / prev_close`;
-  Yahoo's CRSP factor uses `1 - cash / close_on_ex_date`. For
-  dividend-heavy names like INFY, TCS, HINDUNILVR, this compounds to a
-  systematic ~1% offset that is not a bug in either source.
-- Splits and bonus issues match Yahoo within ~1% on the day after the
-  event (the difference is the dividend layer above, not the split math).
-- Run `python scripts/reconcile_yahoo_sweep.py --top 50 --from D --to D --tolerance 1.0`
-  to reproduce. The script lives outside `pipeline/` because `yfinance`
-  pulls pandas as a transitive dep, which the pipeline package
-  intentionally avoids; install it via the optional `reconcile` extra:
+- **96.88% of row-comparisons within ±1%** (25,329 daily closes across 48
+  symbols; TATAMOTORS and ZOMATO have no continuous Yahoo series across
+  their renames). The previous report on the same range was 88.79%; the
+  gain came from instrument chains, the full-history `prev_close` lookup
+  and summed same-day dividends.
+- Forty-six symbols reconcile at 98.96% to 100%. The two exceptions are
+  Yahoo-side: TRENT (Yahoo applies the 1:2 bonus on 2026-01-01, the
+  exchange ex-date is 2026-06-04) and ITC (Yahoo scales history for the
+  January 2025 hotels demerger, the NSE convention does not).
+- Yahoo's dividend factor `1 - cash / prev_close` equals the NSE
+  convention `(prev_close - cash) / prev_close`, so the dividend formula
+  is not a source of difference.
+- Run `tej-bazaar reconcile --top 50 --from D --to D --tolerance 1.0` to
+  reproduce. Yahoo is fetched through `yfinance`
+  (`pipeline/reconcile/yahoo.py`), imported lazily so the pipeline itself
+  never pulls pandas; install it via the optional `reconcile` extra:
   `pip install -e ".[reconcile]"`.
 
 The pipeline skips market holidays automatically using `exchange_calendars` (NSE/BSE share trading days).
@@ -322,7 +330,7 @@ See [ROADMAP.md](./ROADMAP.md) for the full plan.
 - [x] **Phase 4**: Corporate actions, adjusted close, symbol history, Yahoo reconciliation
 - [x] **Phase 5**: Derived metrics (returns, 52w hi/lo, avg volume and turnover)
 - [x] **Phase 5.5**: Point-in-time liquidity universe
-- [ ] **Phase 6**: TypeScript SDK (Python SDK shipped as `tejhq`)
+- [ ] **Phase 6**: SDKs. Python shipped as `tejhq` 0.3.0 on PyPI; TypeScript client built in `tej-sdk-ts` (0.1.0), not yet on npm
 
 ---
 

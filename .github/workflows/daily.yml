@@ -170,6 +170,10 @@ jobs:
         # "queryable", not "started".
         id: status
         if: steps.traded.outputs.value == 'true'
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
           TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           echo "published_at=$TS" >> "$GITHUB_OUTPUT"

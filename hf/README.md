@@ -119,7 +119,7 @@ One file per exchange. Each row is one contiguous interval.
 
 ### 5. `metrics/`: returns and rolling stats
 
-One file per exchange per year. Computed on `adj_close`; volume and turnover on raw values.
+One file per exchange per year, plus `<ex>_latest.parquet` with only the newest trading day for quick cross-sectional reads. Computed on `adj_close`; volume and turnover on raw values.
 
 | Field | Type | Notes |
 |-------|------|-------|

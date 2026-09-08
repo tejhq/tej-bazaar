@@ -421,6 +421,12 @@ def test_metrics_build_writes_per_year_parquet(tmp_path: Path):
     assert df["ret_1d"][0] is None
     assert df["ret_1d"][1] == pytest.approx((102 - 101) / 101)
 
+    # Newest day also lands in <ex>_latest.parquet, one row per instrument.
+    latest = pl.read_parquet(out_dir / "nse_latest.parquet")
+    assert latest.height == 1
+    assert latest["date"][0] == date(2025, 1, 5)
+    assert latest["ret_1d"][0] == pytest.approx((105 - 104) / 104)
+
 
 def test_metrics_build_all_years_writes_each(tmp_path: Path):
     adjusted_dir = tmp_path / "adjusted"

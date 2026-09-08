@@ -101,7 +101,9 @@ contiguous interval during which an ISIN traded under a single symbol.
 
 #### 5. Derived metrics (`metrics/`)
 
-One file per exchange per calendar year: `metrics/<ex>_<YYYY>.parquet`.
+One file per exchange per calendar year: `metrics/<ex>_<YYYY>.parquet`, plus
+`metrics/<ex>_latest.parquet` holding only the newest trading day so the API
+screener can answer "today" with one small read. Rewritten every run.
 
 | Field | Type | Description |
 |-------|------|-------------|

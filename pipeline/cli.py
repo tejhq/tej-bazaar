@@ -818,6 +818,17 @@ def metrics_build(
             slice_.write_parquet(out_path)
             summary.add_row(ex, str(y), str(slice_.height), str(out_path))
 
+        # One-day slice for the newest trading day, so a "what is the market
+        # doing today" query (the API screener) reads ~1 MB, not the whole
+        # year. Rewritten every run. Skipped by `<ex>_<YYYY>` globs since the
+        # suffix is not a year.
+        latest_day = metrics["date"].max()
+        if latest_day is not None:
+            latest = metrics.filter(pl.col("date") == latest_day)
+            latest_path = out_dir / f"{ex.lower()}_latest.parquet"
+            latest.write_parquet(latest_path)
+            summary.add_row(ex, str(latest_day), str(latest.height), str(latest_path))
+
     console.print(summary)
 
 

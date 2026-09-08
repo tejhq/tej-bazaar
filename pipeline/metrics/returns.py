@@ -73,11 +73,10 @@ def compute_returns(adjusted: pl.DataFrame) -> pl.DataFrame:
     # Partition on ISIN, or the symbol when ISIN is missing (legacy rows
     # that did not survive the 2012 cutover). Null ISINs would otherwise
     # collapse every such symbol into one series.
-    df = (
-        adjusted.select(["isin", "date", "symbol", "adj_close"])
-        .with_columns(series_key().alias("_key"))
-        .sort(["_key", "date"])
-    )
+    # A caller that knows instrument chains (see pipeline.instrument) passes
+    # `_key` in; otherwise fall back to ISIN-or-symbol.
+    keyed = adjusted if "_key" in adjusted.columns else adjusted.with_columns(series_key().alias("_key"))
+    df = keyed.select(["isin", "date", "symbol", "adj_close", "_key"]).sort(["_key", "date"])
 
     horizon_exprs = [
         (pl.col("adj_close") / pl.col("adj_close").shift(n).over("_key") - 1.0)

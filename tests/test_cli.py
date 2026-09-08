@@ -643,3 +643,64 @@ def test_symbol_history_build_handles_mixed_tree(tmp_path: Path):
         "--prices-dir", str(prices), "--out-dir", str(out),
     ])
     assert result.exit_code == 0, result.output
+
+
+def test_status_write_prices_then_derived(tmp_path: Path):
+    import json
+
+    out = tmp_path / "api" / "v1" / "status.json"
+    r = runner.invoke(app, ["status", "write", "--stage", "prices", "--trading-date", "2026-09-08",
+                            "--run-url", "https://github.com/tejhq/tej-bazaar/actions/runs/1", "--out", str(out)])
+    assert r.exit_code == 0, r.stdout
+    body = json.loads(out.read_text())
+    assert body["trading_date"] == "2026-09-08"
+    assert body["stage"] == "prices"
+    assert body["prices_published_at"].endswith("Z")
+    assert body["derived_published_at"] is None
+    assert body["run_url"].endswith("/runs/1")
+
+    r = runner.invoke(app, ["status", "write", "--stage", "derived", "--trading-date", "2026-09-08",
+                            "--prices-published-at", body["prices_published_at"], "--out", str(out)])
+    assert r.exit_code == 0, r.stdout
+    body2 = json.loads(out.read_text())
+    assert body2["prices_published_at"] == body["prices_published_at"]
+    assert body2["derived_published_at"].endswith("Z")
+
+    r = runner.invoke(app, ["status", "write", "--stage", "nope", "--trading-date", "2026-09-08", "--out", str(out)])
+    assert r.exit_code != 0
+    r = runner.invoke(app, ["status", "write", "--stage", "prices", "--trading-date", "8 Sep", "--out", str(out)])
+    assert r.exit_code != 0
+
+
+def test_actions_reparse_recomputes_from_subject(tmp_path: Path):
+    adir = tmp_path / "actions"
+    adir.mkdir()
+    df = pl.DataFrame(
+        {
+            "exchange": ["NSE", "NSE"],
+            "symbol": ["TCS", "X"],
+            "isin": ["I1", "I2"],
+            "company": ["TCS", "X"],
+            "ex_date": [date(2024, 1, 19), date(2024, 2, 1)],
+            "record_date": [None, None],
+            "type": ["dividend", "bonus"],
+            "ratio_num": [None, None],
+            "ratio_den": [None, None],
+            "cash_amount": [9.0, None],
+            "face_value_from": [None, None],
+            "face_value_to": [None, None],
+            "raw_subject": ["Interim Dividend - Rs 9 Per Share Special Dividend - Rs 18 Per Share", "Bonus 1:2"],
+        },
+        schema_overrides={"ratio_num": pl.Int64, "ratio_den": pl.Int64, "record_date": pl.Date,
+                          "cash_amount": pl.Float64, "face_value_from": pl.Float64, "face_value_to": pl.Float64},
+    )
+    df.write_parquet(adir / "nse_2024.parquet")
+    r = runner.invoke(app, ["actions", "reparse", "--actions-dir", str(adir)])
+    assert r.exit_code == 0, r.stdout
+    out = pl.read_parquet(adir / "nse_2024.parquet")
+    assert out["cash_amount"].to_list() == [27.0, None]
+    assert out["ratio_num"].to_list() == [None, 1]
+    assert out["ratio_den"].to_list() == [None, 2]
+    # Second run changes nothing.
+    r = runner.invoke(app, ["actions", "reparse", "--actions-dir", str(adir)])
+    assert r.exit_code == 0 and "0" in r.stdout

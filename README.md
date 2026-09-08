@@ -34,6 +34,10 @@ NSE and BSE moved to the **SEBI CMTS bhavcopy format** in 2024. The pipeline det
 
 Legacy BSE files identify instruments by numeric `SC_CODE` with no clean bridge to modern tickers, so BSE starts at the CMTS cutover.
 
+### Instrument chains
+
+A face value split, a scheme of arrangement or a re-listing issues a new ISIN for the same company, and the bhavcopy switches to it on the ex date. Roughly 590 NSE symbols have done this since 2010. Every derived tree partitions by an instrument chain rather than by raw ISIN: two ISIN intervals belong to the same chain when the same symbol moved from one to the other with at most 30 calendar days between the last day of the old and the first day of the new (`pipeline/instrument.py`). A symbol that vanished for longer and returned on a fresh ISIN is treated as a new instrument, which also covers ticker reuse by an unrelated company. Without this, a split factor never reached the old rows, the 52 week window restarted, and the name fell out of the liquidity universe for a full lookback. The `isin` column in every published file stays exactly as the exchange reported it; the chain is an internal partition key only.
+
 ### Output trees
 
 Six parquet trees are produced and published, each under its own top-level
@@ -82,8 +86,10 @@ Same columns as the bhavcopy, plus:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `adj_factor_cumulative` | Float64 | Product of factors of all corporate actions with ex_date > `date` for this ISIN. `1.0` when no later actions. |
+| `adj_factor_cumulative` | Float64 | Product of factors of all corporate actions with ex_date > `date` for this instrument chain. `1.0` when no later actions. |
 | `adj_close` | Float64 | `close * adj_factor_cumulative`; continuous through splits, bonuses, dividends. |
+
+Factor conventions: split `fv_to / fv_from`; bonus N:M `M / (N + M)`; dividend `(prev_close - cash) / prev_close` with `prev_close` the close on the session before the ex date, looked up across the full price history so a next-year dividend is priced off its real prior close and not the 31 December one. When several payouts go ex the same day (final plus interim, a special dividend, InvIT interest plus return of capital) `cash_amount` is their sum, taken from the announcement text. Demergers, rights, buybacks and mergers carry factor `1.0`: the series is not scaled for them, which is the NSE convention and differs from Yahoo Finance, which scales history for spin-offs.
 
 #### 4. Symbol history (`symbol_history/`)
 
@@ -147,6 +153,9 @@ months it qualified for. This is a survivorship-bias-free backtest universe.
 `api/v1/snapshot/<ex>/<DATE>.json` and `api/v1/actions/<SYMBOL>.json`.
 The Cloudflare Worker in front of `api.tejhq.dev` serves and slices these
 directly, so free-tier requests never reach DuckDB. Not mirrored to HuggingFace.
+`api/v1/status.json` sits beside them: `tej-bazaar status write` records the
+trading date and publish times of the last run, served keyless at
+`api.tejhq.dev/v1/status` as the freshness signal.
 
 ---
 

@@ -103,10 +103,41 @@ def _extract_details(
         if m:
             return None, None, None, float(m.group(1)), float(m.group(2))
     elif action_type == "dividend":
-        m = _RE_MONEY.search(text)
-        if m:
-            return None, None, float(m.group(1)), None, None
+        cash = dividend_cash(text)
+        if cash is not None:
+            return None, None, cash, None, None
     return None, None, None, None, None
+
+
+# "Per Equity Share Of Rs.10/- Each", "face value Rs 2": a par value, not cash.
+_RE_PAR_NOTE = re.compile(
+    r"(?:(?:share|unit)s?\s+of\s+|face\s+value\s+(?:of\s+)?)(?:Re?s?\.?)\s*-?\s*\d+(?:\.\d+)?\s*(?:/-)?\s*(?:each)?",
+    re.I,
+)
+_RE_TOTAL_THEN_BREAKDOWN = re.compile(r"compris|consist|includ|break", re.I)
+
+
+def dividend_cash(text: str) -> float | None:
+    """Cash per share going ex on the date, from the announcement text.
+
+    One amount is the common case. Several amounts mean several payouts on
+    the same ex date ("Final Dividend Rs 4 And Special Dividend Rs 10",
+    "Interim Dividend Rs 25 / Dividend Rs 65", InvIT interest plus return
+    of capital plus dividend): the price drops by the total, so they are
+    summed. The one exception is a distribution that states its total and
+    then breaks it down ("Distribution Rs 2.23 Per Unit Comprises Of ..."),
+    where the first amount already is the total. A par value note ("Per
+    Share Of Rs 10 Each") is stripped before extraction.
+    """
+    cleaned = _RE_PAR_NOTE.sub(" ", text or "")
+    amounts = [float(x) for x in _RE_MONEY.findall(cleaned)]
+    if not amounts:
+        return None
+    if len(amounts) == 1:
+        return amounts[0]
+    if "distribution" in cleaned.lower() and _RE_TOTAL_THEN_BREAKDOWN.search(cleaned):
+        return amounts[0]
+    return round(sum(amounts), 4)
 
 
 def parse_nse_record(rec: dict[str, Any]) -> CorporateAction | None:

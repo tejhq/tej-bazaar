@@ -47,26 +47,45 @@ UNIVERSE_SCHEMA: dict[str, pl.DataType] = {
 }
 
 
-def build_universe(prices: pl.DataFrame, exchange: str, *, top_n: int = TOP_N, window: int = WINDOW) -> pl.DataFrame:
+def build_universe(
+    prices: pl.DataFrame,
+    exchange: str,
+    *,
+    top_n: int = TOP_N,
+    window: int = WINDOW,
+    chain: pl.DataFrame | None = None,
+) -> pl.DataFrame:
     """Compute monthly point-in-time top-``top_n`` by trailing turnover.
 
     ``prices`` is raw bhavcopy for one exchange (any span of years). Rows
-    are keyed by ISIN where present, else by symbol (pre-2012 NSE).
+    are keyed by instrument chain when ``chain`` (from
+    :func:`pipeline.instrument.chain_map`) is given, else by ISIN where
+    present, else by symbol (pre-2012 NSE). Without the chain a name that
+    moved to a new ISIN, as every face value split does, would need a full
+    fresh window before it is eligible again.
     """
     if prices.is_empty():
         return pl.DataFrame(schema=UNIVERSE_SCHEMA)
 
+    base = prices.select("date", "symbol", "isin", "name", "turnover")
+    if chain is not None and not chain.is_empty():
+        base = base.join(chain, on="isin", how="left")
+    else:
+        base = base.with_columns(pl.lit(None, dtype=pl.Utf8).alias("chain_isin"))
     df = (
-        prices
-        .select("date", "symbol", "isin", "name", "turnover")
+        base
         .with_columns(
             pl.col("isin").fill_null(""),
             pl.col("name").fill_null(""),
             pl.col("turnover").fill_null(0.0),
         )
         .with_columns(
-            pl.when(pl.col("isin") == "").then(pl.col("symbol")).otherwise(pl.col("isin")).alias("key")
+            pl.coalesce(
+                pl.col("chain_isin"),
+                pl.when(pl.col("isin") == "").then(pl.col("symbol")).otherwise(pl.col("isin")),
+            ).alias("key")
         )
+        .drop("chain_isin")
         # One row per (key, date): a symbol listed in two series the same
         # day counts its turnover once, on the busier series.
         .sort(["key", "date", "turnover"], descending=[False, False, True])

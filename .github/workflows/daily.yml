@@ -47,6 +47,7 @@ jobs:
       date: ${{ steps.date.outputs.value }}
       year: ${{ steps.year.outputs.value }}
       traded: ${{ steps.traded.outputs.value }}
+      published_at: ${{ steps.status.outputs.published_at }}
     steps:
       - uses: actions/checkout@v5
 
@@ -163,6 +164,22 @@ jobs:
             --snapshot-years "${{ github.event.inputs.snapshots || 'current' }}"
           tej-bazaar publish-r2 --data-dir data/api --bucket tej-bazaar
 
+      - name: Publish pipeline status (prices)
+        # Served keyless at api.tejhq.dev/v1/status. Written only after the
+        # day's rollup and edge JSON are on R2, so the timestamp means
+        # "queryable", not "started".
+        id: status
+        if: steps.traded.outputs.value == 'true'
+        run: |
+          TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          echo "published_at=$TS" >> "$GITHUB_OUTPUT"
+          tej-bazaar status write --stage prices \
+            --trading-date "${{ steps.date.outputs.value }}" \
+            --prices-published-at "$TS" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --out data/status/api/v1/status.json
+          tej-bazaar publish-r2 --data-dir data/status --bucket tej-bazaar
+
       - name: Publish prices to HF
         # data/out now holds only the current-year rollups. delete-pattern
         # converges the HF repo to rollup-only by removing stale dailies.
@@ -256,6 +273,9 @@ jobs:
         # All years, not YTD: a 2026 bonus retroactively rescales every
         # earlier adj_close for that ISIN.
         run: |
+          # Re-derive cash, ratio and face values from the announcement
+          # text so files fetched before an extractor fix are not stale.
+          tej-bazaar actions reparse --actions-dir data/out/actions
           tej-bazaar actions adjust \
             --all-years \
             --exchange both \
@@ -307,6 +327,15 @@ jobs:
             --data-dir data/derived \
             --delete-pattern "actions/*_????????_????????.parquet" \
             -m "daily: ${{ needs.prices.outputs.date }} actions + adjusted + symbol-history + metrics"
+
+      - name: Publish pipeline status (derived)
+        run: |
+          tej-bazaar status write --stage derived \
+            --trading-date "${{ needs.prices.outputs.date }}" \
+            --prices-published-at "${{ needs.prices.outputs.published_at }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --out data/status/api/v1/status.json
+          tej-bazaar publish-r2 --data-dir data/status --bucket tej-bazaar
 
       - name: Summary
         if: always()

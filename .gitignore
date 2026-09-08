@@ -14,5 +14,4 @@ data/out/
 .DS_Store
 logs/
 # Local sweep artifacts
-reconcile_report.md
 data/api/

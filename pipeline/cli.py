@@ -533,6 +533,58 @@ def actions_fetch(
     console.print(summary)
 
 
+@actions_app.command("reparse")
+def actions_reparse(
+    actions_dir: Annotated[
+        Path, typer.Option("--actions-dir", help="Directory of <ex>_<YYYY>.parquet action files")
+    ] = DEFAULT_ACTIONS_OUT_DIR,
+) -> None:
+    """Recompute ratio, cash and face values from `raw_subject` in place.
+
+    The classified fields are derived from the announcement text at fetch
+    time. When the extractor improves (multi-part dividends, par value
+    notes) the stored files are stale until re-fetched; this rewrites them
+    from the text they already carry. Idempotent, runs in the cron before
+    the adjust step.
+    """
+    from pipeline.actions.parse import _classify, _extract_details
+
+    _banner()
+    files = sorted(p for p in actions_dir.glob("*_*.parquet") if _year_from_actions_filename(p) is not None)
+    if not files:
+        console.print(f"[yellow]no action files under {actions_dir}[/yellow]")
+        return
+    table = Table(title="actions reparse", border_style="cyan")
+    table.add_column("File", style="dim")
+    table.add_column("Rows", justify="right")
+    table.add_column("Changed", justify="right", style="green")
+    for path in files:
+        df = pl.read_parquet(path)
+        rn, rd, cash, fvf, fvt = [], [], [], [], []
+        for t, subj in zip(df["type"].to_list(), df["raw_subject"].to_list()):
+            kind = t if t in ("bonus", "rights", "split", "dividend") else _classify(subj or "")
+            a, b, c, d, e = _extract_details(kind, subj or "")
+            rn.append(a); rd.append(b); cash.append(c); fvf.append(d); fvt.append(e)
+        new = df.with_columns(
+            pl.Series("ratio_num", rn, dtype=pl.Int64),
+            pl.Series("ratio_den", rd, dtype=pl.Int64),
+            pl.Series("cash_amount", cash, dtype=pl.Float64),
+            pl.Series("face_value_from", fvf, dtype=pl.Float64),
+            pl.Series("face_value_to", fvt, dtype=pl.Float64),
+        )
+        cols = ["ratio_num", "ratio_den", "cash_amount", "face_value_from", "face_value_to"]
+        changed = int(
+            (df.select(cols).with_row_index() != new.select(cols).with_row_index())
+            .select(pl.any_horizontal(pl.all().exclude("index")))
+            .sum()
+            .item()
+        )
+        if changed:
+            new.write_parquet(path)
+        table.add_row(path.name, str(df.height), str(changed))
+    console.print(table)
+
+
 @actions_app.command("adjust")
 def actions_adjust(
     year: Annotated[
@@ -601,10 +653,32 @@ def actions_adjust(
         if not anchors.is_empty():
             console.print(f"[dim]{ex}: backfilling ISIN for {anchors.height} symbols "
                           f"continuous across the legacy cutover[/dim]")
+        chain = _chain_for(prices_dir / ex.lower(), anchors)
+        linked = chain.filter(pl.col("isin") != pl.col("chain_isin")).height
+        if linked:
+            console.print(f"[dim]{ex}: {linked} ISINs linked into instrument chains "
+                          f"(face value changes, re-listings)[/dim]")
         for y in years:
-            _adjust_one_year(ex, y, prices_dir, actions_dir, out_dir, summary, anchors)
+            _adjust_one_year(ex, y, prices_dir, actions_dir, out_dir, summary, anchors, chain)
 
     console.print(summary)
+
+
+def _chain_for(prices_root: Path, anchors: pl.DataFrame | None = None) -> pl.DataFrame:
+    """Instrument chains over every price year under ``prices_root``."""
+    from pipeline.instrument import chain_map
+    from pipeline.isin_backfill import apply_isin_anchors
+
+    files = sorted(prices_root.rglob("*.parquet"))
+    if not files:
+        return chain_map(pl.DataFrame({"date": [], "symbol": [], "isin": []}))
+    prices = pl.concat(
+        [pl.read_parquet(p, columns=["symbol", "isin", "date"]) for p in files],
+        how="vertical_relaxed",
+    )
+    if anchors is not None and not anchors.is_empty():
+        prices = apply_isin_anchors(prices, anchors)
+    return chain_map(prices)
 
 
 def _adjust_one_year(
@@ -615,6 +689,7 @@ def _adjust_one_year(
     out_dir: Path,
     summary: Table,
     anchors: pl.DataFrame | None = None,
+    chain: pl.DataFrame | None = None,
 ) -> None:
     prices_glob = list((prices_dir / ex.lower()).rglob(f"year={year}/**/*.parquet"))
     if not prices_glob:
@@ -654,15 +729,34 @@ def _adjust_one_year(
     all_prices_paths = sorted(
         (prices_dir / ex.lower()).rglob("*.parquet")
     )
+    lookup = prices
     if all_prices_paths:
         all_prices = pl.concat(
-            [pl.read_parquet(p, columns=["symbol", "isin", "date"])
-             for p in all_prices_paths]
+            [pl.read_parquet(p, columns=["symbol", "isin", "date", "close"])
+             for p in all_prices_paths],
+            how="vertical_relaxed",
         )
-        actions = resolve_isin_via_symbol_history(actions, all_prices)
+        if anchors is not None and not anchors.is_empty():
+            from pipeline.isin_backfill import apply_isin_anchors
 
-    factors = compute_action_factors(actions, prices)
-    adjusted = back_adjust(prices, factors)
+            all_prices = apply_isin_anchors(all_prices, anchors)
+        actions = resolve_isin_via_symbol_history(actions, all_prices)
+        # Dividend factors need the close on the session before each
+        # ex_date. Actions in later years must look that up in those
+        # years' prices, not in this year's slice, or every future
+        # dividend is priced off the 31 December close and the cumulative
+        # factor steps at each 1 January.
+        lookup = all_prices
+
+    # Partition by instrument chain, not raw ISIN, so a split that issued a
+    # new ISIN still scales the old rows and a later dividend on the new
+    # ISIN reaches back across the change. Raw ISINs are restored on output.
+    from pipeline.instrument import remap_isin, restore_isin
+
+    if chain is None:
+        chain = pl.DataFrame(schema={"isin": pl.Utf8, "chain_isin": pl.Utf8})
+    factors = compute_action_factors(remap_isin(actions, chain).drop("_isin_raw"), remap_isin(lookup, chain))
+    adjusted = restore_isin(back_adjust(remap_isin(prices, chain), factors))
     out_path = out_dir / f"{ex.lower()}_{year}.parquet"
     adjusted.write_parquet(out_path)
     summary.add_row(ex, str(year), str(prices.height), str(actions.height),
@@ -817,6 +911,11 @@ def metrics_build(
             [pl.read_parquet(p) for p in files]
         ).select(["isin", "date", "symbol", "adj_close", "volume", "turnover"])
 
+        # Windows run per instrument chain so a face value split (new ISIN)
+        # does not restart the 52 week window or fake a 90% one-day return.
+        from pipeline.instrument import attach_key, chain_map
+
+        full_adjusted = attach_key(full_adjusted, chain_map(full_adjusted))
         returns = compute_returns(full_adjusted)
         rolling = compute_rolling(full_adjusted).drop(["symbol", "adj_close"])
         metrics = returns.join(rolling, on=["isin", "date"], how="left")
@@ -1133,7 +1232,14 @@ def universe_build(
         if not paths:
             console.print(f"[red]no bhavcopy parquet under {prices_dir / ex.lower()}[/red]")
             raise typer.Exit(code=1)
-        uni = build_universe(read_bhavcopy(paths), ex, top_n=top_n)
+        from pipeline.instrument import chain_map
+        from pipeline.isin_backfill import apply_isin_anchors, isin_anchors
+
+        prices = read_bhavcopy(paths)
+        # Chains need the backfilled ISINs so pre-2012 rows link up too;
+        # the universe itself is built on the raw rows (isin as reported).
+        keyed = apply_isin_anchors(prices, isin_anchors(prices))
+        uni = build_universe(prices, ex, top_n=top_n, chain=chain_map(keyed))
         out = out_dir / f"{ex.lower()}_liquid.parquet"
         uni.write_parquet(out, compression="zstd")
         n_rb = uni["rebalance_date"].n_unique() if not uni.is_empty() else 0
@@ -1440,6 +1546,56 @@ def _year_from_actions_filename(p: Path) -> int | None:
 
 def main() -> None:
     app()
+
+
+status_app = typer.Typer(
+    name="status",
+    help="Pipeline freshness record served at api.tejhq.dev/v1/status.",
+    no_args_is_help=True,
+)
+app.add_typer(status_app)
+
+
+@status_app.command("write")
+def status_write(
+    trading_date: Annotated[str, typer.Option("--trading-date", help="Trading date YYYY-MM-DD")],
+    stage: Annotated[str, typer.Option("--stage", help="prices or derived")],
+    out: Annotated[Path, typer.Option("--out", help="Where to write status.json")],
+    run_url: Annotated[
+        str | None, typer.Option("--run-url", help="GitHub Actions run URL for this publish")
+    ] = None,
+    prices_published_at: Annotated[
+        str | None,
+        typer.Option("--prices-published-at", help="RFC3339 UTC time the prices job published"),
+    ] = None,
+) -> None:
+    """Write the JSON the API serves as /v1/status.
+
+    The prices job writes it right after the day's bhavcopy is on R2; the
+    derived job rewrites it with `derived_published_at` set once actions,
+    adjusted prices, metrics and the universe are published. A stale
+    `trading_date` is the honest signal that a run was missed.
+    """
+    import json
+
+    if stage not in ("prices", "derived"):
+        raise typer.BadParameter("--stage must be prices or derived")
+    try:
+        date.fromisoformat(trading_date)
+    except ValueError as e:
+        raise typer.BadParameter("--trading-date must be YYYY-MM-DD") from e
+    now = datetime.now(tz=__import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    body = {
+        "trading_date": trading_date,
+        "stage": stage,
+        "prices_published_at": prices_published_at or (now if stage == "prices" else None),
+        "derived_published_at": now if stage == "derived" else None,
+        "run_url": run_url,
+        "generated_at": now,
+    }
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(body, separators=(",", ":")) + "\n", encoding="utf-8")
+    console.print(f"[green]status[/green] {stage} {trading_date} -> {out}")
 
 
 if __name__ == "__main__":

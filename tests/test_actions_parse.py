@@ -330,3 +330,31 @@ def test_corporate_action_dataclass_frozen():
     import pytest
     with pytest.raises(Exception):
         a.symbol = "Y"  # type: ignore[misc]
+
+
+def test_dividend_cash_sums_same_day_payouts():
+    from pipeline.actions.parse import dividend_cash
+
+    assert dividend_cash("Dividend - Rs 28 Per Share") == 28.0
+    assert dividend_cash("Interim Dividend - Rs 9 Per Share Special Dividend - Rs 18 Per Share") == 27.0
+    assert dividend_cash("Final Dividend Rs.4/- Per Share And Special Dividend Rs.10/- Per Share") == 14.0
+    assert dividend_cash("Interim Dividend - Rs 25 Per Sh/Dividend - Rs 65 Per Share") == 90.0
+    assert dividend_cash("Annual General Meeting/Final Dividend Re 0.20/- Per Share + Special Dividend Re 0.20/- Per Share") == 0.4
+    # InvIT components with no stated total: the unitholder receives the sum.
+    assert dividend_cash("Distribution - Interest Payment Rs 2.72 Per Unit/ Principle Re 0.28 Per Unit") == 3.0
+    assert dividend_cash("Dividend - Rs 2.83 Per Unit/Interest Amount - Rs 0.65 Per Unit/Repayment Of Spv Debt - Rs 1.85 Per Unit") == 5.33
+
+
+def test_dividend_cash_total_then_breakdown_takes_total():
+    from pipeline.actions.parse import dividend_cash
+
+    assert dividend_cash("Distribution - Rs 2.230 Per Unit Comprises Of Interest - Re 0.642 Per Unit / Dividend - Rs 1.299 Per Unit") == 2.23
+    assert dividend_cash("Distribution - Rs 12.71 Per Unit Consisting Of Rs 11.22 Per Unit Taxable Dividend & Rs 1.38 Per Unit Exempt") == 12.71
+
+
+def test_dividend_cash_ignores_par_value_note():
+    from pipeline.actions.parse import dividend_cash
+
+    assert dividend_cash("Annual General Meeting/ Dividend Rs. 2.50/- Per Equity Share Of Rs.10/- Each") == 2.5
+    assert dividend_cash("Dividend Rs 3 Per Share on face value of Rs 2") == 3.0
+    assert dividend_cash("Annual General Meeting") is None

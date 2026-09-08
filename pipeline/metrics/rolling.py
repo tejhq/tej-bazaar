@@ -84,11 +84,13 @@ def compute_rolling(prices_with_adj: pl.DataFrame) -> pl.DataFrame:
 
     # Partition on ISIN, or the symbol when ISIN is missing, so each
     # instrument's window is self-contained and null ISINs never merge.
-    df = (
-        prices_with_adj.select(["isin", "date", "symbol", "adj_close", "volume", "turnover"])
-        .with_columns(series_key().alias("_key"))
-        .sort(["_key", "date"])
+    # A caller that knows instrument chains (see pipeline.instrument) passes
+    # `_key` in; otherwise fall back to ISIN-or-symbol.
+    keyed = (
+        prices_with_adj if "_key" in prices_with_adj.columns
+        else prices_with_adj.with_columns(series_key().alias("_key"))
     )
+    df = keyed.select(["isin", "date", "symbol", "adj_close", "volume", "turnover", "_key"]).sort(["_key", "date"])
     return df.with_columns(
         high_52w=pl.col("adj_close")
         .rolling_max(window_size=WINDOW_52W, min_samples=WINDOW_52W)

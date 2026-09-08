@@ -52,6 +52,8 @@ No broker, no auth, no scraping. The same data is served at [api.tejhq.dev](http
 
 NSE and BSE both moved to the SEBI CMTS bhavcopy format on 2024-07-08. The pipeline parses both the modern CMTS layout and the legacy NSE layout, which is how NSE reaches back to 2010. Legacy BSE files identify instruments by numeric scrip code with no clean bridge to modern tickers, so BSE starts at the cutover.
 
+Derived trees are computed per instrument chain, not per raw ISIN: when a face value split or re-listing issues a new ISIN under the same symbol within 30 days, adjustment factors, rolling windows and universe eligibility carry across the change. The `isin` column always holds the value the exchange reported on that day.
+
 Pre-2012 NSE rows carry no `isin` and no `trades` because the source never had them. They are null in the raw tree rather than invented. The derived trees backfill the ISIN for symbols that traded continuously across the 2012 cutover so corporate actions and rolling windows apply back to 2010; symbols that did not survive the cutover stay ISIN-less and are windowed by symbol.
 
 ## The six trees
@@ -103,7 +105,7 @@ One file per exchange per year. Every raw bhavcopy column, plus:
 | `adj_factor_cumulative` | float64 | Product of factors of all actions with `ex_date` after this row, per ISIN. `1.0` when none. |
 | `adj_close` | float64 | `close * adj_factor_cumulative`. Continuous through splits, bonuses and dividends. |
 
-Dividend factor follows the NSE convention, `(prev_close - cash) / prev_close`. Reconciled at 89% within 1% of Yahoo Finance adjusted close across 25,000 daily comparisons; the remaining gap is mostly Yahoo's different dividend formula.
+Dividend factor follows the NSE convention, `(prev_close - cash) / prev_close`; several payouts on one ex date are summed. Demergers and rights are not scaled, which is where this series and Yahoo Finance differ by design. Reconciled at 89% within 1% of Yahoo Finance adjusted close across 25,000 daily comparisons; the remaining gap is mostly Yahoo's different dividend formula.
 
 ### 4. `symbol_history/`: which symbol an ISIN traded under, and when
 

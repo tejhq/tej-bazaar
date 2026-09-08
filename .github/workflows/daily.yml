@@ -265,11 +265,14 @@ jobs:
 
       - name: Build derived metrics (all years)
         run: |
+          # --slices-dir lands under data/api so the month files go to R2
+          # only (the step below publishes data/api), not to HuggingFace.
           tej-bazaar metrics build \
             --all-years \
             --exchange both \
             --adjusted-dir data/derived/prices_adjusted \
-            --out-dir data/derived/metrics
+            --out-dir data/derived/metrics \
+            --slices-dir data/api/metrics
 
       - name: Build liquidity universe (all years)
         run: |

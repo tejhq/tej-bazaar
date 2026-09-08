@@ -758,6 +758,15 @@ def metrics_build(
         Path,
         typer.Option("--out-dir", help="Directory for per-year metrics parquet"),
     ] = DEFAULT_METRICS_DIR,
+    slices_dir: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--slices-dir",
+            help="Also write one file per calendar month, `<ex>_YYYY-MM.parquet`, "
+            "sorted by date in a single row group. The API screener reads these "
+            "for historical dates: about 4 MB instead of a 50 MB year file.",
+        ),
+    ] = None,
 ) -> None:
     """Build per-year metrics parquet (returns + rolling windows).
 
@@ -817,6 +826,21 @@ def metrics_build(
             out_path = out_dir / f"{ex.lower()}_{y}.parquet"
             slice_.write_parquet(out_path)
             summary.add_row(ex, str(y), str(slice_.height), str(out_path))
+
+        if slices_dir is not None:
+            slices_dir.mkdir(parents=True, exist_ok=True)
+            n_slices = 0
+            for y in target_years:
+                year_rows = metrics.filter(pl.col("date").dt.year() == y)
+                for (m,), part in year_rows.with_columns(
+                    pl.col("date").dt.month().alias("_m")
+                ).partition_by("_m", as_dict=True, maintain_order=True).items():
+                    part.drop("_m").sort(["date", "symbol"]).write_parquet(
+                        slices_dir / f"{ex.lower()}_{y}-{m:02d}.parquet",
+                        row_group_size=1_000_000,
+                    )
+                    n_slices += 1
+            summary.add_row(ex, "months", str(n_slices), str(slices_dir))
 
         # One-day slice for the newest trading day, so a "what is the market
         # doing today" query (the API screener) reads ~1 MB, not the whole

@@ -103,7 +103,10 @@ contiguous interval during which an ISIN traded under a single symbol.
 
 One file per exchange per calendar year: `metrics/<ex>_<YYYY>.parquet`, plus
 `metrics/<ex>_latest.parquet` holding only the newest trading day so the API
-screener can answer "today" with one small read. Rewritten every run.
+screener can answer "today" with one small read. Rewritten every run. The
+cron also writes one file per calendar month, `metrics/<ex>_YYYY-MM.parquet`,
+sorted by date, to R2 only (`--slices-dir`); the screener reads those for
+historical dates instead of scanning a whole year file.
 
 | Field | Type | Description |
 |-------|------|-------------|

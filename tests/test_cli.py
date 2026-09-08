@@ -428,6 +428,36 @@ def test_metrics_build_writes_per_year_parquet(tmp_path: Path):
     assert latest["ret_1d"][0] == pytest.approx((105 - 104) / 104)
 
 
+def test_metrics_build_monthly_slices(tmp_path: Path):
+    adjusted_dir = tmp_path / "adjusted"
+    out_dir = tmp_path / "metrics"
+    slices_dir = tmp_path / "slices"
+    rows = [
+        ("INE001", date(2025, m, d), "X", 100.0 + m + d, 1000, 1.0)
+        for m in (1, 2) for d in (2, 3)
+    ] + [("INE002", date(2025, 2, 3), "Y", 50.0, 10, 1.0)]
+    _write_adjusted_parquet(adjusted_dir, "NSE", 2025, rows)
+
+    result = runner.invoke(
+        app,
+        ["metrics", "build", "--year", "2025", "--exchange", "NSE",
+         "--adjusted-dir", str(adjusted_dir), "--out-dir", str(out_dir),
+         "--slices-dir", str(slices_dir)],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert sorted(p.name for p in slices_dir.glob("*.parquet")) == [
+        "nse_2025-01.parquet", "nse_2025-02.parquet",
+    ]
+    feb = pl.read_parquet(slices_dir / "nse_2025-02.parquet")
+    assert feb.height == 3
+    assert feb["date"].to_list() == [date(2025, 2, 2), date(2025, 2, 3), date(2025, 2, 3)]
+    assert feb["symbol"].to_list() == ["X", "X", "Y"]
+    # No month files leak into the per-year output dir.
+    assert sorted(p.name for p in out_dir.glob("*.parquet")) == [
+        "nse_2025.parquet", "nse_latest.parquet",
+    ]
+
+
 def test_metrics_build_all_years_writes_each(tmp_path: Path):
     adjusted_dir = tmp_path / "adjusted"
     out_dir = tmp_path / "metrics"

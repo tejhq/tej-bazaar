@@ -149,6 +149,8 @@ directly, so free-tier requests never reach DuckDB. Not mirrored to HuggingFace.
 
 ### From HuggingFace (recommended)
 
+The dataset card at [huggingface.co/datasets/tejhq/indian-markets](https://huggingface.co/datasets/tejhq/indian-markets) is `hf/README.md` in this repo, uploaded by the daily cron with `publish --card`. Its `configs` block gives the viewer one tab per tree.
+
 ```python
 import polars as pl
 from huggingface_hub import hf_hub_download
@@ -223,6 +225,7 @@ pip install -e ".[dev]"
 | `tej-bazaar compact --year YYYY --exchange both --from-r2 --refresh` | Fold daily files into the year rollup on R2, dedupe by `(symbol, date)` |
 | `tej-bazaar publish --dry-run` | List local parquet files; no upload |
 | `tej-bazaar publish --repo tejhq/indian-markets` | Push to HuggingFace (needs `HF_TOKEN`) |
+| `tej-bazaar publish --card hf/README.md` | Push parquet and upload the dataset card as the repo README |
 | `tej-bazaar publish-r2 --data-dir data/out` | Push parquet and JSON to R2, ETag-deduped (needs `R2_ENDPOINT`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`) |
 | `tej-bazaar pull-r2 --prefix nse/ --prefix actions/` | Seed a local `data/out` from R2, local files win |
 | `tej-bazaar r2-prune --prefix nse/year=2026/month=` | Delete a key prefix on R2, refuses bucket-root prefixes |

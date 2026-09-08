@@ -38,6 +38,7 @@ def publish_to_hf(
     dry_run: bool = False,
     api: HfApi | None = None,
     delete_patterns: list[str] | None = None,
+    card: Path | None = None,
 ) -> PublishResult:
     """Push parquet files under `data_dir` to HF dataset repo `repo_id`.
 
@@ -49,6 +50,9 @@ def publish_to_hf(
       globs so the repo converges to rollup-per-year once a year is
       compacted; without it the stale dailies would sit beside the rollup
       and double-count those dates for anyone globbing the whole tree.
+    - `card` is a local dataset card (YAML front matter + markdown) uploaded
+      as the repo's README.md after the parquet, so the viewer configs and
+      the docs travel with the data.
     """
     if not data_dir.exists():
         raise PublishError(f"data dir {data_dir} does not exist")
@@ -56,6 +60,8 @@ def publish_to_hf(
     files = sorted(data_dir.rglob("*.parquet"))
     if not files:
         raise PublishError(f"no parquet files under {data_dir}")
+    if card is not None and not card.is_file():
+        raise PublishError(f"dataset card {card} does not exist")
     total_bytes = sum(f.stat().st_size for f in files)
 
     if dry_run:
@@ -84,6 +90,14 @@ def publish_to_hf(
             commit_message=commit_message
             or f"tej-bazaar: sync {len(files)} parquet files",
         )
+        if card is not None:
+            hf.upload_file(
+                path_or_fileobj=str(card),
+                path_in_repo="README.md",
+                repo_id=repo_id,
+                repo_type="dataset",
+                commit_message="tej-bazaar: dataset card",
+            )
     except HfHubHTTPError as e:
         raise PublishError(f"HF upload failed: {e}") from e
 

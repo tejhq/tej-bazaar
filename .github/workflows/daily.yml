@@ -176,19 +176,20 @@ jobs:
             --data-dir data/out \
             --delete-pattern "nse/year=*/month=*" \
             --delete-pattern "bse/year=*/month=*" \
+            --card hf/README.md \
             -m "daily: ${{ steps.date.outputs.value }} NSE+BSE prices"
 
       - name: Summary
         if: always()
         run: |
           {
-            echo "## prices — ${{ steps.date.outputs.value }}"
+            echo "## prices: ${{ steps.date.outputs.value }}"
             echo ""
             files=$(find data/out -name "*.parquet" 2>/dev/null | sort)
             if [ -n "$files" ]; then
               echo '```'; echo "$files"; echo '```'
             else
-              echo "_No parquet written — holiday or bhavcopy not yet published._"
+              echo "_No parquet written: holiday or bhavcopy not yet published._"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -295,16 +296,20 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_HUB_DISABLE_XET: '1'
         run: |
+          # delete-pattern drops the one-off date-range action files a
+          # manual fetch once left beside the per-year files; they would
+          # double count for anyone globbing actions/*.parquet.
           tej-bazaar publish \
             --repo tejhq/indian-markets \
             --data-dir data/derived \
+            --delete-pattern "actions/*_????????_????????.parquet" \
             -m "daily: ${{ needs.prices.outputs.date }} actions + adjusted + symbol-history + metrics"
 
       - name: Summary
         if: always()
         run: |
           {
-            echo "## derived — ${{ needs.prices.outputs.date }}"
+            echo "## derived: ${{ needs.prices.outputs.date }}"
             echo ""
             echo "corp-actions fetch: ${{ steps.actions.outcome }}"
             echo ""

@@ -122,3 +122,37 @@ def test_publish_custom_repo_and_message(tmp_path: Path):
     kwargs = api.upload_folder.call_args.kwargs
     assert kwargs["repo_id"] == "me/foo"
     assert kwargs["commit_message"] == "custom msg"
+
+
+def test_publish_card_uploaded_after_parquet(tmp_path: Path):
+    _seed_parquets(tmp_path, n=1)
+    card = tmp_path / "card.md"
+    card.write_text("---\nlicense: mit\n---\n# card\n")
+    api = MagicMock()
+    api.upload_folder.return_value = MagicMock(commit_url="u")
+
+    with patch("pipeline.publish.create_repo"):
+        publish_to_hf(tmp_path, token="t", api=api, card=card)
+
+    api.upload_folder.assert_called_once()
+    api.upload_file.assert_called_once()
+    kwargs = api.upload_file.call_args.kwargs
+    assert kwargs["path_or_fileobj"] == str(card)
+    assert kwargs["path_in_repo"] == "README.md"
+    assert kwargs["repo_id"] == DEFAULT_REPO_ID
+    assert kwargs["repo_type"] == "dataset"
+
+
+def test_publish_card_missing_raises(tmp_path: Path):
+    _seed_parquets(tmp_path, n=1)
+    with pytest.raises(PublishError, match="dataset card"):
+        publish_to_hf(tmp_path, token="t", api=MagicMock(), card=tmp_path / "nope.md")
+
+
+def test_publish_no_card_no_upload_file(tmp_path: Path):
+    _seed_parquets(tmp_path, n=1)
+    api = MagicMock()
+    api.upload_folder.return_value = MagicMock(commit_url="u")
+    with patch("pipeline.publish.create_repo"):
+        publish_to_hf(tmp_path, token="t", api=api)
+    api.upload_file.assert_not_called()

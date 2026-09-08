@@ -400,6 +400,10 @@ def publish(
             "(repeatable, e.g. `nse/year=*/month=*`)",
         ),
     ] = None,
+    card: Annotated[
+        Path | None,
+        typer.Option("--card", help="Dataset card to upload as the repo README.md"),
+    ] = None,
 ) -> None:
     """Push partitioned parquet under DATA_DIR to a HuggingFace dataset repo."""
     _banner()
@@ -410,6 +414,7 @@ def publish(
             commit_message=message,
             dry_run=dry_run,
             delete_patterns=list(delete_pattern) if delete_pattern else None,
+            card=card,
         )
     except PublishError as e:
         console.print(f"[red]publish failed[/red]: {e}")

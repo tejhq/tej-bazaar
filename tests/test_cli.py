@@ -704,3 +704,31 @@ def test_actions_reparse_recomputes_from_subject(tmp_path: Path):
     # Second run changes nothing.
     r = runner.invoke(app, ["actions", "reparse", "--actions-dir", str(adir)])
     assert r.exit_code == 0 and "0" in r.stdout
+
+
+def _adjusted(tmp: Path, ex: str, sym: str, cliff: bool) -> None:
+    """Write one exchange's adjusted prices, optionally with an unexplained 10:1 step."""
+    rows = []
+    for i in range(6):
+        d = date(2024, 1, 1 + i)
+        px = 100.0 if not (cliff and i >= 3) else 10.0
+        rows.append({"date": d, "symbol": sym, "adj_close": px})
+    pl.DataFrame(rows).write_parquet(tmp / f"{ex}_2024.parquet")
+
+
+# `--exchange both` used to glob "both_*.parquet", which matches nothing, so audit and derive
+# silently reported no data and BSE was never covered by either command.
+@pytest.mark.parametrize("cmd", ["audit", "derive"])
+def test_actions_both_covers_each_exchange(tmp_path: Path, cmd: str):
+    adj, acts = tmp_path / "adj", tmp_path / "acts"
+    adj.mkdir()
+    acts.mkdir()
+    _adjusted(adj, "nse", "AAA", cliff=True)
+    _adjusted(adj, "bse", "BBB", cliff=True)
+    result = runner.invoke(
+        app,
+        ["actions", cmd, "--exchange", "both", "--adjusted-dir", str(adj), "--actions-dir", str(acts)],
+    )
+    assert "no adjusted prices" not in result.stdout
+    assert "NSE" in result.stdout and "BSE" in result.stdout
+    assert "AAA" in result.stdout and "BBB" in result.stdout

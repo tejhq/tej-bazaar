@@ -3,6 +3,7 @@ from datetime import date
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 from pipeline.actions import (
     ACTION_SCHEMA,
@@ -12,7 +13,7 @@ from pipeline.actions import (
     parse_nse_record,
     to_polars,
 )
-from pipeline.actions.parse import _classify
+from pipeline.actions.parse import _classify, _extract_details
 
 NSE_FIXTURE = Path(__file__).parent / "fixtures" / "nse_actions_sample.json"
 BSE_FIXTURE = Path(__file__).parent / "fixtures" / "bse_actions_sample.json"
@@ -358,3 +359,42 @@ def test_dividend_cash_ignores_par_value_note():
     assert dividend_cash("Annual General Meeting/ Dividend Rs. 2.50/- Per Equity Share Of Rs.10/- Each") == 2.5
     assert dividend_cash("Dividend Rs 3 Per Share on face value of Rs 2") == 3.0
     assert dividend_cash("Annual General Meeting") is None
+
+
+# The exchange writes a face value split a dozen ways and often without the word "from". These
+# shapes all appear in the live NSE feed and all used to parse without a ratio, which silently
+# became an adjustment factor of 1.0 and left prices unadjusted across the split.
+SPLIT_SHAPES = [
+    ("Fv Splt Frm Rs 10 To Rs 2", 10.0, 2.0),
+    ("Fv Split Rs.10 To Rs.1", 10.0, 1.0),
+    ("Fv Splt Frm Rs 10 To Re 1", 10.0, 1.0),
+    ("Face Value Split Rs 10 To Rs 5", 10.0, 5.0),
+    ("Fv Split Rs.10 To Re.1", 10.0, 1.0),
+    ("Fv Split Rs.10/- To Rs.2/-", 10.0, 2.0),
+    ("Fv Spl-Rs10tore1/Div-3", 10.0, 1.0),
+    ("Face Value Split Rs.10/- To Rs.1/-", 10.0, 1.0),
+    ("Face Value Split(Sub-Division) - From Rs 10/- Per Share To Rs 2/- Per Share", 10.0, 2.0),
+    ("Consolidation of Shares From Re 1 To Rs 10", 1.0, 10.0),
+]
+
+
+@pytest.mark.parametrize("text,fv_from,fv_to", SPLIT_SHAPES)
+def test_split_shapes_all_carry_a_ratio(text, fv_from, fv_to):
+    assert _classify(text) == "split"
+    _, _, _, got_from, got_to = _extract_details("split", text)
+    assert (got_from, got_to) == (fv_from, fv_to)
+
+
+def test_a_row_carrying_both_a_bonus_and_a_split_keeps_both():
+    for text in ("Bonus 1:1 And Face Value Split Rs.10/- To Rs.5/-", "Bon 1:1/Fv Spl Rs.10tors.5"):
+        assert _classify(text) == "split"
+        num, den, _, fv_from, fv_to = _extract_details("split", text)
+        assert (fv_from, fv_to) == (10.0, 5.0)
+        assert (num, den) == (1, 1)
+
+
+def test_dividends_mentioning_a_face_value_are_still_dividends():
+    text = "Annual General Meeting / Final Dividend Rs.36.50/- Per Equity Share"
+    assert _classify(text) == "dividend"
+    _, _, cash, _, _ = _extract_details("dividend", text)
+    assert cash == 36.50

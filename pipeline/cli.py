@@ -59,6 +59,7 @@ from pipeline.publish_r2 import DEFAULT_BUCKET as DEFAULT_R2_BUCKET
 from pipeline.publish_r2 import PublishError as PublishR2Error
 from pipeline.publish_r2 import prune_r2_prefix, publish_to_r2, pull_from_r2
 from pipeline.push import partition_path, write_partitioned
+from pipeline.actions.schema import ACTION_SCHEMA
 from pipeline.reconcile import (
     YahooFetchError,
     fetch_yahoo_adjusted,
@@ -173,6 +174,26 @@ def _parse_date(s: str) -> date:
         return datetime.strptime(s, "%Y-%m-%d").date()
     except ValueError as e:
         raise typer.BadParameter(f"date must be YYYY-MM-DD ({e})") from e
+
+
+def _load_adjusted_and_actions(
+    ex: str, adjusted_dir: Path, actions_dir: Path
+) -> tuple[pl.DataFrame | None, pl.DataFrame | None]:
+    """Read one exchange's adjusted closes and its actions, or (None, None) when it has no prices."""
+    ex = ex.lower()
+    prices = sorted(adjusted_dir.glob(f"{ex}_*.parquet"))
+    if not prices:
+        return None, None
+    adjusted = pl.concat([pl.read_parquet(p, columns=["date", "symbol", "adj_close"]) for p in prices])
+    acts = sorted(actions_dir.glob(f"{ex}_*.parquet"))
+    actions = (
+        pl.concat(
+            [pl.read_parquet(p, columns=["symbol", "ex_date", "type", "raw_subject"]) for p in acts]
+        )
+        if acts
+        else None
+    )
+    return adjusted, actions
 
 
 def _exchanges(choice: ExchangeChoice) -> list[str]:
@@ -547,6 +568,7 @@ def actions_reparse(
     from the text they already carry. Idempotent, runs in the cron before
     the adjust step.
     """
+    from pipeline.actions.derive import is_derived
     from pipeline.actions.parse import _classify, _extract_details
 
     _banner()
@@ -560,19 +582,30 @@ def actions_reparse(
     table.add_column("Changed", justify="right", style="green")
     for path in files:
         df = pl.read_parquet(path)
-        rn, rd, cash, fvf, fvt = [], [], [], [], []
-        for t, subj in zip(df["type"].to_list(), df["raw_subject"].to_list()):
-            kind = t if t in ("bonus", "rights", "split", "dividend") else _classify(subj or "")
+        kinds, rn, rd, cash, fvf, fvt = [], [], [], [], [], []
+        for row in df.iter_rows(named=True):
+            t, subj = row["type"], row["raw_subject"]
+            # Rows derived from a price step carry a note, not an announcement; reparsing their
+            # text would classify them as "other" and throw away the ratio.
+            if is_derived(subj):
+                kinds.append(t); rn.append(row["ratio_num"]); rd.append(row["ratio_den"])
+                cash.append(row["cash_amount"]); fvf.append(row["face_value_from"]); fvt.append(row["face_value_to"])
+                continue
+            # The type is derived from the text like every other field, so reclassify it too. A
+            # face value split written "Fv Splt Frm Rs 10 To Re 1" was stored as "other" and its
+            # factor silently stayed 1.0 however well the details parsed.
+            kind = _classify(subj or "") if subj else t
             a, b, c, d, e = _extract_details(kind, subj or "")
-            rn.append(a); rd.append(b); cash.append(c); fvf.append(d); fvt.append(e)
+            kinds.append(kind); rn.append(a); rd.append(b); cash.append(c); fvf.append(d); fvt.append(e)
         new = df.with_columns(
+            pl.Series("type", kinds, dtype=pl.Utf8),
             pl.Series("ratio_num", rn, dtype=pl.Int64),
             pl.Series("ratio_den", rd, dtype=pl.Int64),
             pl.Series("cash_amount", cash, dtype=pl.Float64),
             pl.Series("face_value_from", fvf, dtype=pl.Float64),
             pl.Series("face_value_to", fvt, dtype=pl.Float64),
         )
-        cols = ["ratio_num", "ratio_den", "cash_amount", "face_value_from", "face_value_to"]
+        cols = ["type", "ratio_num", "ratio_den", "cash_amount", "face_value_from", "face_value_to"]
         changed = int(
             (df.select(cols).with_row_index() != new.select(cols).with_row_index())
             .select(pl.any_horizontal(pl.all().exclude("index")))
@@ -583,6 +616,140 @@ def actions_reparse(
             new.write_parquet(path)
         table.add_row(path.name, str(df.height), str(changed))
     console.print(table)
+
+
+@actions_app.command("derive")
+def actions_derive(
+    adjusted_dir: Annotated[
+        Path, typer.Option("--adjusted-dir", help="Directory of adjusted price parquet")
+    ] = DEFAULT_PRICES_ADJUSTED_DIR,
+    actions_dir: Annotated[
+        Path, typer.Option("--actions-dir", help="Directory of action parquet")
+    ] = DEFAULT_ACTIONS_OUT_DIR,
+    exchange: Annotated[
+        ExchangeChoice, typer.Option("--exchange", "-e", case_sensitive=False)
+    ] = ExchangeChoice.NSE,
+    threshold: Annotated[float, typer.Option("--threshold")] = 0.40,
+    write: Annotated[
+        bool, typer.Option("--write", help="Write the derived actions; otherwise only print them")
+    ] = False,
+    clear: Annotated[
+        bool, typer.Option("--clear", help="Remove every previously derived row and stop")
+    ] = False,
+) -> None:
+    """Add split actions for cliffs the exchange never announced, chiefly ETF unit splits.
+
+    Prints what it would do and changes nothing unless `--write` is passed. A step is only
+    derived when no action of any kind sits within five days of it and the implied ratio is one
+    issuers actually use, so a demerger or rights issue the pipeline deliberately leaves unscaled
+    is never overridden. Derived rows say so in `raw_subject`. Run `actions adjust` afterwards.
+    """
+    from pipeline.actions.audit import find_jumps
+    from pipeline.actions.derive import DERIVED_NOTE, derive_splits, merge_derived
+
+    _banner()
+    if clear:
+        removed = 0
+        for ex in _exchanges(exchange):
+            for path in sorted(actions_dir.glob(f"{ex.lower()}_*.parquet")):
+                df = pl.read_parquet(path)
+                keep = df.filter(~pl.col("raw_subject").str.starts_with(DERIVED_NOTE))
+                if keep.height != df.height:
+                    removed += df.height - keep.height
+                    keep.write_parquet(path)
+        console.print(f"removed {removed} derived rows; now run: actions adjust --all-years")
+        return
+    wrote = False
+    for ex in _exchanges(exchange):
+        adjusted, _ = _load_adjusted_and_actions(ex, adjusted_dir, actions_dir)
+        if adjusted is None:
+            console.print(f"[yellow]no {ex} adjusted prices under {adjusted_dir}[/yellow]")
+            continue
+        act_paths = sorted(actions_dir.glob(f"{ex.lower()}_*.parquet"))
+        actions = pl.concat([pl.read_parquet(p) for p in act_paths]) if act_paths else None
+        jumps = find_jumps(adjusted, actions, threshold)
+        derived = derive_splits(jumps, actions)
+        unexplained = sum(1 for j in jumps if not j.explained)
+        console.print(
+            f"{ex}: {unexplained} unexplained steps, [green]{len(derived)} derived[/green] across "
+            f"{len({a.symbol for a in derived})} symbols; {unexplained - len(derived)} left for review"
+        )
+        table = Table(title=f"{ex.lower()} derived splits", border_style="green")
+        for col in ("Symbol", "Ex date", "Ratio"):
+            table.add_column(col)
+        for a in sorted(derived, key=lambda a: a.ex_date, reverse=True)[:40]:
+            ratio = (
+                f"{a.face_value_from / a.face_value_to:.0f}:1"
+                if a.face_value_to and a.face_value_from >= a.face_value_to
+                else f"1:{a.face_value_to / a.face_value_from:.0f}"
+            )
+            table.add_row(a.symbol, str(a.ex_date), ratio)
+        console.print(table)
+        if not derived or not write:
+            if derived:
+                console.print("[dim]pass --write to apply, then run actions adjust[/dim]")
+            continue
+        by_year: dict[int, list] = {}
+        for a in derived:
+            by_year.setdefault(a.ex_date.year, []).append(a)
+        for year, group in sorted(by_year.items()):
+            path = actions_dir / f"{ex.lower()}_{year}.parquet"
+            existing = pl.read_parquet(path) if path.exists() else pl.DataFrame([], schema=ACTION_SCHEMA)
+            merged = merge_derived(existing, group)
+            merged.write_parquet(path)
+            console.print(f"  {path.name}: {existing.height} -> {merged.height} rows")
+        wrote = True
+    if wrote:
+        console.print("[green]written[/green]; now run: actions adjust --all-years")
+
+
+@actions_app.command("audit")
+def actions_audit(
+    adjusted_dir: Annotated[
+        Path, typer.Option("--adjusted-dir", help="Directory of adjusted price parquet")
+    ] = DEFAULT_PRICES_ADJUSTED_DIR,
+    actions_dir: Annotated[
+        Path, typer.Option("--actions-dir", help="Directory of action parquet")
+    ] = DEFAULT_ACTIONS_OUT_DIR,
+    exchange: Annotated[
+        ExchangeChoice, typer.Option("--exchange", "-e", case_sensitive=False)
+    ] = ExchangeChoice.NSE,
+    threshold: Annotated[
+        float, typer.Option("--threshold", help="One day move that counts as a jump")
+    ] = 0.40,
+    limit: Annotated[int, typer.Option("--limit", help="Rows to print")] = 40,
+) -> None:
+    """Report adjusted series that still jump, and whether an action explains each one.
+
+    A correctly adjusted series has no cliffs; circuit bands cap a real one day move well under
+    40%. Anything larger is an action the pipeline did not apply. Unexplained rows are the ones to
+    chase: a split whose ratio never parsed, a split typed as something else, or an action the
+    exchange feed never carried, which is the usual case for ETF unit splits.
+    """
+    from pipeline.actions.audit import find_jumps
+
+    _banner()
+    found = 0
+    for ex in _exchanges(exchange):
+        adjusted, actions = _load_adjusted_and_actions(ex, adjusted_dir, actions_dir)
+        if adjusted is None:
+            console.print(f"[yellow]no {ex} adjusted prices under {adjusted_dir}[/yellow]")
+            continue
+        jumps = find_jumps(adjusted, actions, threshold)
+        unexplained = [j for j in jumps if not j.explained]
+        found += len(unexplained)
+        console.print(
+            f"{ex}: {adjusted.height:,} adjusted bars, {len(jumps)} jumps beyond {threshold:.0%}, "
+            f"[red]{len(unexplained)} unexplained[/red] across {len({j.symbol for j in unexplained})} symbols"
+        )
+        table = Table(title=f"{ex} unexplained jumps", border_style="red")
+        for col in ("Symbol", "Previous", "Close", "Date", "Close", "Implied"):
+            table.add_column(col, justify="right" if "Close" in col else "left")
+        for j in sorted(unexplained, key=lambda j: j.date, reverse=True)[:limit]:
+            table.add_row(j.symbol, str(j.prev_date), f"{j.prev_close:,.2f}", str(j.date), f"{j.close:,.2f}", j.implied)
+        console.print(table)
+    if found:
+        raise typer.Exit(1)
 
 
 @actions_app.command("adjust")
@@ -1001,7 +1168,7 @@ def reconcile(
     _banner()
     if exchange == ExchangeChoice.BOTH:
         raise typer.BadParameter("reconcile takes one exchange at a time")
-    ex = exchange.value
+    ex = exchange.value.lower()
     start = _parse_date(from_date)
     end = _parse_date(to_date)
     if end < start:

@@ -37,7 +37,12 @@ def compute_factor(action: CorporateAction, prev_close: float | None = None) -> 
         fv_to = action.face_value_to
         if fv_from is None or fv_to is None or fv_from <= 0:
             return 1.0
-        return fv_to / fv_from
+        f = fv_to / fv_from
+        # A row can announce a bonus and a split together; both move the price.
+        n, d = action.ratio_num, action.ratio_den
+        if n is not None and d is not None and n + d > 0:
+            f *= d / (n + d)
+        return f
 
     if t == "bonus":
         n = action.ratio_num

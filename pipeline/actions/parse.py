@@ -30,15 +30,23 @@ _RE_MONEY = re.compile(r"(?:Re?s?\.?)\s*-?\s*(\d+(?:\.\d+)?)", re.I)
 # Bonus ratio: "Bonus 3:1" or "Bonus issue 1:50"
 _RE_BONUS = re.compile(r"bonus(?:\s+issue)?\s+(\d+)\s*:\s*(\d+)", re.I)
 
+# The exchange also writes a bonus as "Bon 1:1" when it shares a line with a split.
+_RE_BONUS_SHORT = re.compile(r"\bbon\s*(\d+)\s*:\s*(\d+)", re.I)
+
 # Rights ratio: "Rights 6:179", "Right 1:10"
 _RE_RIGHTS = re.compile(r"rights?\s+(\d+)\s*:\s*(\d+)", re.I)
 
-# Split face-value transition:
-# "From Rs10/- Per Share To Rs 5/- Per Share"
-# "From Rs.10/- to Rs.1/-"
+# Split face-value transition. The exchange writes this a dozen ways and "from" is often absent:
+#   "From Rs10/- Per Share To Rs 5/- Per Share"   "From Rs.10/- to Rs.1/-"
+#   "Face Value Split Rs 10 To Re 1"              "Fv Splt Frm Rs 10 To Rs 2"
+#   "Fv Spl-Rs10tore1/Div-3"                      "Bon 1:1/Fv Spl Rs.10tors.5"
+# The old pattern required a literal "from" and left 44 rows without a ratio, which silently became
+# a factor of 1.0 and left prices unadjusted across the split.
 _RE_SPLIT_FACE = re.compile(
-    r"from\s*(?:re?s?\.?\s*)?(\d+(?:\.\d+)?)\s*/?-?\s*"
-    r"(?:per\s+share\s+)?to\s*(?:re?s?\.?\s*)?(\d+(?:\.\d+)?)",
+    r"(?:from|frm)?\s*"
+    r"(?:re?s?\.?)\s*(\d+(?:\.\d+)?)\s*(?:/-)?\s*"
+    r"(?:per\s+(?:share|unit)s?\s*)?(?:each\s*)?"
+    r"to\s*(?:re?s?\.?)\s*(\d+(?:\.\d+)?)",
     re.I,
 )
 
@@ -63,6 +71,9 @@ def _classify(text: str) -> ActionType:
     # "Consolidation of Shares" is a reverse split; same type, inverted face values.
     if (
         "split" in t
+        # The exchange abbreviates: "Fv Splt Frm Rs 10 To Rs 2", "Fv Spl-Rs10tore1/Div-3".
+        or "splt" in t
+        or re.search(r"\bfv\s*spl", t)
         or "sub-division" in t
         or "subdivision" in t
         or "consolidation of shares" in t
@@ -101,7 +112,11 @@ def _extract_details(
     elif action_type == "split":
         m = _RE_SPLIT_FACE.search(text)
         if m:
-            return None, None, None, float(m.group(1)), float(m.group(2))
+            # Some rows carry both in one line: "Bonus 1:1 And Face Value Split Rs.10/- To Rs.5/-".
+            # Keep the bonus ratio too so the factor can apply both.
+            b = _RE_BONUS.search(text) or _RE_BONUS_SHORT.search(text)
+            num, den = (int(b.group(1)), int(b.group(2))) if b else (None, None)
+            return num, den, None, float(m.group(1)), float(m.group(2))
     elif action_type == "dividend":
         cash = dividend_cash(text)
         if cash is not None:

@@ -218,7 +218,8 @@ jobs:
     needs: prices
     if: needs.prices.outputs.traded == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Two full adjust passes now, about three and a half minutes each.
+    timeout-minutes: 35
     env:
       R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -286,6 +287,43 @@ jobs:
             --prices-dir data/out \
             --actions-dir data/out/actions \
             --out-dir data/derived/prices_adjusted
+          # Some instruments split with no announcement anywhere in the feed,
+          # ETF units chiefly, so the only evidence is a cliff in a series
+          # that should now be continuous. Derive those, then adjust again so
+          # the new rows are applied. Second pass is unconditional: it costs
+          # about three minutes and keeps the step deterministic.
+          tej-bazaar actions derive \
+            --write \
+            --exchange both \
+            --adjusted-dir data/derived/prices_adjusted \
+            --actions-dir data/out/actions
+          tej-bazaar actions adjust \
+            --all-years \
+            --exchange both \
+            --prices-dir data/out \
+            --actions-dir data/out/actions \
+            --out-dir data/derived/prices_adjusted
+
+      - name: Stage the corrected actions for publishing
+        # The fetch step only produces the current year, and reparse and
+        # derive both write in place under data/out/actions. Publishing
+        # data/derived alone would ship the raw fetch and leave every earlier
+        # year on R2 exactly as it was first written, which is why a 2013
+        # face value split still had null ratio columns in the published tree.
+        run: |
+          mkdir -p data/derived/actions
+          cp data/out/actions/*.parquet data/derived/actions/
+
+      - name: Audit the adjusted series
+        # Informational: a correctly adjusted series has no cliffs, so what
+        # is left here is what the pipeline still cannot explain.
+        continue-on-error: true
+        run: |
+          tej-bazaar actions audit \
+            --exchange both \
+            --adjusted-dir data/derived/prices_adjusted \
+            --actions-dir data/out/actions \
+            --limit 20
 
       - name: Build derived metrics (all years)
         run: |

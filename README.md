@@ -4,7 +4,7 @@
 
 Part of the [TejHQ](https://github.com/tejhq) ecosystem.
 
-> **Status:** NSE 2010 to today and BSE 2024-07-08 to today, live. A two-job GitHub Actions cron runs at 20:00 IST on trading days: `prices` folds the day into the year rollup and publishes to R2 and [`tejhq/indian-markets`](https://huggingface.co/datasets/tejhq/indian-markets); `derived` rebuilds corporate actions, symbol history, adjusted prices, metrics and the liquidity universe from full history. Both jobs also pre-render the JSON that `api.tejhq.dev` serves at the edge. See [ROADMAP.md](./ROADMAP.md).
+> **Status:** NSE 2010 to today and BSE 2024-07-08 to today, live. A two-job GitHub Actions cron runs at 18:30 IST on trading days, with a 21:30 IST retry, and each run sweeps the last seven days so a late or missed run heals itself: `prices` folds the day into the year rollup and publishes to R2 and [`tejhq/indian-markets`](https://huggingface.co/datasets/tejhq/indian-markets); `derived` rebuilds corporate actions, symbol history, adjusted prices, metrics and the liquidity universe from full history. Both jobs also pre-render the JSON that `api.tejhq.dev` serves at the edge. See [ROADMAP.md](./ROADMAP.md).
 
 ---
 
@@ -283,12 +283,14 @@ NSE/BSE corporate actions (REST API, BSE scrip-master ISIN lookup)
 
 ### Daily cron
 
-`.github/workflows/daily.yml`, 20:00 IST on weekdays, two jobs:
+`.github/workflows/daily.yml`, 18:30 IST on weekdays with a 21:30 IST retry, two jobs:
 
-- `prices`: fetch today's bhavcopy, publish, refresh the year rollup, prune dailies, export and publish edge JSON, write `api/v1/status.json`, publish to HuggingFace with the dataset card (`--card hf/README.md`). Skips cleanly on holidays.
+Each run sweeps the last seven calendar days rather than one date, because GitHub starts a scheduled run late, by four hours and more, and a start past 18:30 UTC is already the next day in IST. A run that asked for the wrong date used to write nothing and still go green, which is how 24 and 25 September 2026 went missing. Days already present are skipped, so the sweep is cheap and any gap fills itself. `tej-bazaar check-sessions` then fails the run when a session that the exchange calendar says traded is neither newly fetched nor already published past its due hour, and the alert job fires.
+
+- `prices`: sweep the recent bhavcopies, publish, refresh the year rollup, prune dailies, export and publish edge JSON, write `api/v1/status.json`, publish to HuggingFace with the dataset card (`--card hf/README.md`). Skips cleanly on holidays.
 - `derived`: pull full history from R2, refresh corporate actions, rebuild symbol history, reparse actions, rebuild adjusted prices, metrics (year files, `_latest`, and R2-only month slices under `data/api/metrics`) and universe into `data/derived/`, publish that directory only, then rewrite `status.json` with `derived_published_at`. A failure here publishes nothing stale and fails the run, so GitHub emails on it. Only the NSE corporate-actions website fetch is allowed to fail, falling back to the history already on R2.
 
-Manual runs: `gh workflow run daily-bhavcopy -f date=YYYY-MM-DD`, or `-f from=D -f to=D` to backfill a range. Set the `ALERT_WEBHOOK_URL` secret for Discord or Slack failure pings.
+Manual runs: `gh workflow run daily-bhavcopy -f date=YYYY-MM-DD`, `-f from=D -f to=D` to backfill a range, or `-f lookback=30` to widen the sweep. Set the `ALERT_WEBHOOK_URL` secret for Discord or Slack failure pings.
 
 ### Verification vs Yahoo Finance
 

@@ -16,7 +16,7 @@ Commands:
 from __future__ import annotations
 
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, Iterable, Optional
@@ -72,6 +72,7 @@ from pipeline.transform import transform
 
 DEFAULT_RAW_DIR = Path("data/raw")
 DEFAULT_OUT_DIR = Path("data/out")
+IST = timezone(timedelta(hours=5, minutes=30))
 DEFAULT_ACTIONS_CACHE_DIR = Path("data/raw/actions")
 DEFAULT_ACTIONS_OUT_DIR = Path("data/out/actions")
 DEFAULT_PRICES_ADJUSTED_DIR = Path("data/out/prices_adjusted")
@@ -362,6 +363,80 @@ def backfill(
         c = counts[ex]
         summary.add_row(ex, str(c["ok"]), str(c["skipped"]), str(c["failed"]))
     console.print(summary)
+
+
+@app.command("check-sessions")
+def check_sessions(
+    from_date: Annotated[str, typer.Option("--from", help="Start date YYYY-MM-DD")],
+    to_date: Annotated[str, typer.Option("--to", help="End date YYYY-MM-DD (inclusive)")],
+    prices_dir: Annotated[Path, typer.Option("--prices-dir")] = DEFAULT_OUT_DIR,
+    due_hour: Annotated[
+        int,
+        typer.Option(
+            "--due-hour",
+            help="IST hour by which a session's bhavcopy is expected (NSE lands ~18:00)",
+        ),
+    ] = 20,
+    published: Annotated[
+        Optional[str],
+        typer.Option(
+            "--published",
+            help="Latest trading date already in the product; sessions up to it count as present",
+        ),
+    ] = None,
+    now: Annotated[
+        Optional[str],
+        typer.Option("--now", help="Override the current IST time, YYYY-MM-DDTHH:MM, for tests"),
+    ] = None,
+) -> None:
+    """Fail if a trading session in the range is missing past its due hour.
+
+    A day with no parquet is ambiguous: holiday, bhavcopy not out yet, already
+    published, or the publisher is broken. The exchange calendar settles the
+    first, the due hour the second, `--published` the third, so what is left is
+    a real failure worth an alert. Nothing here reads the wall-clock date to
+    decide what should exist, which is what let two sessions go missing behind
+    a green run.
+    """
+    _banner()
+    start = _parse_date(from_date)
+    end = _parse_date(to_date)
+    if end < start:
+        raise typer.BadParameter("--to must be on or after --from")
+
+    at = datetime.strptime(now, "%Y-%m-%dT%H:%M") if now else datetime.now(IST).replace(tzinfo=None)
+    have = {
+        _date_from_path(p)
+        for p in prices_dir.rglob("date=*.parquet")
+    } if prices_dir.exists() else set()
+    already = _parse_date(published) if published else None
+
+    sessions = holidays.trading_days_between(start, end, "NSE")
+    table = Table(title=f"sessions {start} to {end}", border_style="cyan")
+    table.add_column("Session", style="bold")
+    table.add_column("Bhavcopy")
+    late: list[date] = []
+    for d in sessions:
+        if d in have:
+            table.add_row(d.isoformat(), "[green]fetched[/green]")
+            continue
+        if already and d <= already:
+            table.add_row(d.isoformat(), "[green]published[/green]")
+            continue
+        if at >= datetime.combine(d, datetime.min.time()).replace(hour=due_hour):
+            table.add_row(d.isoformat(), "[red]missing, past due[/red]")
+            late.append(d)
+        else:
+            table.add_row(d.isoformat(), "[yellow]not published yet[/yellow]")
+    if not sessions:
+        table.add_row("none", "no trading day in range")
+    console.print(table)
+
+    if late:
+        days = ", ".join(d.isoformat() for d in late)
+        console.print(f"[red]missing past due:[/red] {days}")
+        raise typer.Exit(1)
+    console.print("[green]every due session is present[/green]")
 
 
 @app.command()

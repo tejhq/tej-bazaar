@@ -28,7 +28,7 @@
 - [x] Exchange-aware transform (NSE: EQ/BE/BZ; BSE: A/B/T)
 - [x] CLI `--exchange NSE|BSE|both` for fetch + backfill
 - [x] HuggingFace push (`tej-bazaar publish`, content-hash dedup, dry-run)
-- [x] GitHub Actions cron in `.github/workflows/daily.yml`: 14:30 UTC (20:00 IST), Mon-Fri, holiday-safe (skip publish if no parquet written)
+- [x] GitHub Actions cron in `.github/workflows/daily.yml`: 13:00 UTC (18:30 IST) and a 16:00 UTC retry, Mon-Fri, holiday-safe. Each run sweeps the last seven days instead of one clock-derived date, and `check-sessions` fails the run on a session that traded but is neither fetched nor published past its due hour. The clock version skipped 24 and 25 September 2026 green.
 - [x] Backfill script (`tej-bazaar backfill --from D --to D --exchange both`)
 - [ ] Sample data committed under `data/sample/`
 

@@ -732,3 +732,91 @@ def test_actions_both_covers_each_exchange(tmp_path: Path, cmd: str):
     assert "no adjusted prices" not in result.stdout
     assert "NSE" in result.stdout and "BSE" in result.stdout
     assert "AAA" in result.stdout and "BBB" in result.stdout
+
+
+def _session(prices_dir: Path, ex: str, d: str) -> None:
+    day = date.fromisoformat(d)
+    p = prices_dir / ex / f"year={day.year}" / f"month={day.month:02d}" / f"date={d}.parquet"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({"symbol": ["RELIANCE"], "date": [day], "close": [1200.0]}).write_parquet(p)
+
+
+def test_check_sessions_passes_when_every_due_day_is_there(tmp_path: Path):
+    for d in ("2026-09-23", "2026-09-24", "2026-09-25"):
+        _session(tmp_path, "nse", d)
+    result = runner.invoke(
+        app,
+        ["check-sessions", "--from", "2026-09-23", "--to", "2026-09-27",
+         "--prices-dir", str(tmp_path), "--now", "2026-09-27T09:00"],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "every due session is present" in result.stdout
+
+
+def test_check_sessions_fails_on_the_gap_that_went_unnoticed(tmp_path: Path):
+    # The 25th traded and was never fetched; the run that missed it went green.
+    _session(tmp_path, "nse", "2026-09-24")
+    result = runner.invoke(
+        app,
+        ["check-sessions", "--from", "2026-09-23", "--to", "2026-09-26",
+         "--prices-dir", str(tmp_path), "--now", "2026-09-26T00:15"],
+    )
+    assert result.exit_code == 1
+    assert "2026-09-25" in result.stdout
+    assert "missing past due" in result.stdout
+
+
+def test_check_sessions_waits_for_todays_bhavcopy(tmp_path: Path):
+    _session(tmp_path, "nse", "2026-09-24")
+    result = runner.invoke(
+        app,
+        ["check-sessions", "--from", "2026-09-24", "--to", "2026-09-25",
+         "--prices-dir", str(tmp_path), "--now", "2026-09-25T17:00"],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "not published yet" in result.stdout
+
+
+def test_check_sessions_ignores_weekends_and_holidays(tmp_path: Path):
+    # 2 October is Gandhi Jayanti and the 3rd and 4th are a weekend, so a range
+    # holding only those three days has nothing to be missing.
+    result = runner.invoke(
+        app,
+        ["check-sessions", "--from", "2026-10-02", "--to", "2026-10-04",
+         "--prices-dir", str(tmp_path), "--now", "2026-10-05T09:00"],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "no trading day in range" in result.stdout
+
+
+def test_check_sessions_empty_range_is_not_a_failure(tmp_path: Path):
+    result = runner.invoke(
+        app,
+        ["check-sessions", "--from", "2026-09-26", "--to", "2026-09-27",
+         "--prices-dir", str(tmp_path), "--now", "2026-09-28T09:00"],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "no trading day in range" in result.stdout
+
+
+def test_check_sessions_counts_already_published_days(tmp_path: Path):
+    # A day on R2 that this sweep failed to re-fetch is not an outage.
+    result = runner.invoke(
+        app,
+        ["check-sessions", "--from", "2026-09-21", "--to", "2026-09-25",
+         "--prices-dir", str(tmp_path), "--published", "2026-09-25",
+         "--now", "2026-09-26T00:15"],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "published" in result.stdout
+
+
+def test_check_sessions_still_fails_on_the_day_past_what_is_published(tmp_path: Path):
+    result = runner.invoke(
+        app,
+        ["check-sessions", "--from", "2026-09-21", "--to", "2026-09-26",
+         "--prices-dir", str(tmp_path), "--published", "2026-09-24",
+         "--now", "2026-09-26T00:15"],
+    )
+    assert result.exit_code == 1
+    assert "missing past due: 2026-09-25" in result.stdout

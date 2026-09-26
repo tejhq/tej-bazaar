@@ -39,7 +39,7 @@ configs:
 
 # tejhq/indian-markets
 
-End-of-day data for every **NSE** and **BSE** listed equity, built straight from the exchanges' official bhavcopy. Six parquet trees: raw prices, corporate actions, back-adjusted prices, symbol history, derived metrics, and a survivorship-bias-free liquidity universe. Refreshed every trading day at 20:00 IST by an open pipeline.
+End-of-day data for every **NSE** and **BSE** listed equity, built straight from the exchanges' official bhavcopy. Six parquet trees: raw prices, corporate actions, back-adjusted prices, symbol history, derived metrics, and a survivorship-bias-free liquidity universe. Refreshed every trading day by an open pipeline.
 
 No broker, no auth, no scraping. The same data is served at [api.tejhq.dev](https://api.tejhq.dev) and mirrored on Cloudflare R2.
 
@@ -195,7 +195,7 @@ No key needed for prices, snapshots, actions and the pipeline status at `/v1/sta
 
 ## Caveats
 
-- Same-day rows land at about 20:00 IST. Fetching earlier returns the previous session.
+- Same-day rows usually land between 19:00 and 22:00 IST. Fetching earlier returns the previous session. `/v1/status` carries `trading_date`, the honest answer to what is current.
 - Bhavcopy occasionally carries anomalies (close outside `[low, high]`, zero-volume rows). The pipeline drops those before publishing.
 - Corporate action feeds are messy at the source. `type = other` keeps events the classifier could not place, with the original text in `raw_subject`.
 - `actions.isin` is as reported and can be a stale post-merger ISIN. The adjusted tree resolves it; join on `symbol_history` if you need the same.

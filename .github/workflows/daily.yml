@@ -2,14 +2,20 @@ name: daily-bhavcopy
 
 on:
   schedule:
-    # 14:30 UTC = 20:00 IST, Mon-Fri. NSE bhavcopy lands ~18:00 IST,
-    # BSE ~18:30 IST. 20:00 IST gives a 90-min buffer in case the
-    # archives endpoint lags or NSE delays publication.
-    - cron: '30 14 * * 1-5'
+    # NSE bhavcopy lands ~18:00 IST, BSE ~18:30 IST.
+    # 13:00 UTC = 18:30 IST, and 16:00 UTC = 21:30 IST as a retry.
+    # GitHub starts scheduled runs late, four hours and more when the
+    # queue is busy, and a start past 18:30 UTC is already tomorrow in
+    # IST. That is what silently skipped 24 and 25 September 2026: the
+    # job asked for the wrong date and wrote nothing. The range below no
+    # longer depends on the start time being same-day, but an earlier
+    # first attempt plus a retry keeps the usual case one run.
+    - cron: '0 13 * * 1-5'
+    - cron: '0 16 * * 1-5'
   workflow_dispatch:
     inputs:
       date:
-        description: 'Trading date YYYY-MM-DD (defaults to today UTC→IST)'
+        description: 'One trading date YYYY-MM-DD (default: sweep the last `lookback` days)'
         required: false
         default: ''
       from:
@@ -24,14 +30,20 @@ on:
         description: 'Snapshot JSON years to export: current (default) or all (one-time seed)'
         required: false
         default: 'current'
+      lookback:
+        description: 'Calendar days back from today IST to sweep when no date or range is given'
+        required: false
+        default: '7'
 
 concurrency:
   group: daily-bhavcopy
   cancel-in-progress: false
 
 # Two jobs on purpose:
-#   prices  - fetch today's bhavcopy, fold into the year rollup, publish.
-#             Core product. Must be green every trading day.
+#   prices  - sweep the recent trading days, fold into the year rollup,
+#             publish. Core product. Green means every session that was due
+#             is either published or newly fetched, which is not the same as
+#             "the job ran": see the session check in the prices job.
 #   derived - corp actions, symbol history, adjusted prices, metrics.
 #             Rebuilt from full history, published from its own dir.
 # A derived failure never blocks prices, but it DOES fail the run so
@@ -44,8 +56,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     outputs:
-      date: ${{ steps.date.outputs.value }}
-      year: ${{ steps.year.outputs.value }}
+      # date and year come from the parquet actually written, never from the
+      # clock, so a run that starts after IST midnight still labels the day
+      # it really fetched.
+      date: ${{ steps.traded.outputs.date }}
+      year: ${{ steps.traded.outputs.year }}
       traded: ${{ steps.traded.outputs.value }}
       published_at: ${{ steps.status.outputs.published_at }}
     steps:
@@ -59,55 +74,90 @@ jobs:
       - name: Install pipeline
         run: pip install -e .
 
-      - name: Resolve trading date (IST)
-        # With from/to set, `date` becomes the range end for labels.
-        id: date
+      - name: Resolve the range to sweep
+        # A scheduled run sweeps the last `lookback` calendar days, not one
+        # date. Any day already on R2 is folded in again by the dedupe in
+        # compact, so re-fetching is free and a gap heals itself without a
+        # dispatch. A dispatch can still pin an exact date or range.
+        id: range
         run: |
-          if [ -n "${{ github.event.inputs.to }}" ]; then
-            D="${{ github.event.inputs.to }}"
-          elif [ -n "${{ github.event.inputs.date }}" ]; then
-            D="${{ github.event.inputs.date }}"
-          else
-            D=$(TZ=Asia/Kolkata date +%Y-%m-%d)
+          FROM="${{ github.event.inputs.from }}"
+          TO="${{ github.event.inputs.to }}"
+          if [ -z "$FROM" ] && [ -z "$TO" ] && [ -n "${{ github.event.inputs.date }}" ]; then
+            FROM="${{ github.event.inputs.date }}"
+            TO="$FROM"
           fi
-          echo "value=$D" >> "$GITHUB_OUTPUT"
-          echo "Trading date: $D"
-
-      - name: Resolve current year (IST)
-        id: year
-        run: echo "value=$(TZ=Asia/Kolkata date +%Y)" >> "$GITHUB_OUTPUT"
+          [ -n "$TO" ] || TO=$(TZ=Asia/Kolkata date +%Y-%m-%d)
+          if [ -z "$FROM" ]; then
+            BACK="${{ github.event.inputs.lookback || '7' }}"
+            FROM=$(date -u -d "$TO -$BACK days" +%Y-%m-%d)
+          fi
+          echo "from=$FROM" >> "$GITHUB_OUTPUT"
+          echo "to=$TO" >> "$GITHUB_OUTPUT"
+          echo "Sweeping $FROM to $TO"
+          # What the product already serves. The session check below counts
+          # these as present, so one flaky archive fetch on a day that is
+          # already on R2 does not fail the run.
+          PUB=$(curl -fsS --max-time 20 https://api.tejhq.dev/v1/status \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin).get("trading_date",""))' \
+            || true)
+          case "$PUB" in
+            ????-??-??) echo "Product is current to $PUB" ;;
+            *) PUB=""; echo "::warning::no trading_date from /v1/status" ;;
+          esac
+          echo "published=$PUB" >> "$GITHUB_OUTPUT"
 
       - name: Fetch NSE+BSE
-        # Single date by default. A from/to dispatch backfills a range
-        # (holidays skipped); the rollup refresh below folds all of it in.
+        # Holidays and days not yet published are skipped, days already
+        # present are skipped, so this is safe to run as often as it fires.
         run: |
-          if [ -n "${{ github.event.inputs.from }}" ]; then
-            tej-bazaar backfill \
-              --from "${{ github.event.inputs.from }}" \
-              --to "${{ steps.date.outputs.value }}" \
-              --exchange both \
-              --out-dir data/out
-          else
-            tej-bazaar fetch "${{ steps.date.outputs.value }}" \
-              --exchange both \
-              --out-dir data/out
-          fi
+          tej-bazaar backfill \
+            --from "${{ steps.range.outputs.from }}" \
+            --to "${{ steps.range.outputs.to }}" \
+            --exchange both \
+            --out-dir data/out
 
-      - name: Did anything trade today?
-        # Holiday or bhavcopy not yet published: fetch writes nothing and
-        # every publish step below plus the whole derived job is skipped.
+      - name: What did the sweep actually fetch?
+        # Nothing new is the normal outcome on a holiday, a weekend, or a
+        # retry after the first run of the day already published. Every
+        # publish step below and the whole derived job then skip. The label
+        # and the years to compact come from the files, not the clock.
         id: traded
         run: |
-          if find data/out/nse data/out/bse -name '*.parquet' 2>/dev/null | grep -q .; then
-            echo "value=true" >> "$GITHUB_OUTPUT"
-          else
+          FILES=$(find data/out/nse data/out/bse -name 'date=*.parquet' 2>/dev/null | sort)
+          if [ -z "$FILES" ]; then
             echo "value=false" >> "$GITHUB_OUTPUT"
-            echo "No price parquet written for ${{ steps.date.outputs.value }}; holiday or not yet published."
+            echo "date=${{ steps.range.outputs.to }}" >> "$GITHUB_OUTPUT"
+            echo "year=$(TZ=Asia/Kolkata date +%Y)" >> "$GITHUB_OUTPUT"
+            echo "years=" >> "$GITHUB_OUTPUT"
+            echo "Nothing new in ${{ steps.range.outputs.from }}..${{ steps.range.outputs.to }}."
+            exit 0
           fi
+          LATEST=$(echo "$FILES" | sed -n 's|.*/date=\([0-9-]\{10\}\)\.parquet$|\1|p' | sort -u | tail -1)
+          YEARS=$(echo "$FILES" | sed -n 's|.*/year=\([0-9]\{4\}\)/.*|\1|p' | sort -u | tr '\n' ' ')
+          echo "value=true" >> "$GITHUB_OUTPUT"
+          echo "date=$LATEST" >> "$GITHUB_OUTPUT"
+          echo "year=${LATEST%%-*}" >> "$GITHUB_OUTPUT"
+          echo "years=$YEARS" >> "$GITHUB_OUTPUT"
+          echo "Fetched up to $LATEST, years: $YEARS"
+          echo "$FILES"
 
-      - name: Publish today's daily to R2
-        # Idempotent (ETag-dedup). Uploads today's daily file; the refresh
-        # step folds it into the year rollup and prunes the daily key.
+      - name: Every due session must be present
+        # The one check that turns a silent no-op into a failure. A missing
+        # day is a holiday (the exchange calendar knows), or not published
+        # yet (before the due hour), or the publisher is broken. Only the
+        # last one fails, and then the alert job fires.
+        run: |
+          tej-bazaar check-sessions \
+            --from "${{ steps.range.outputs.from }}" \
+            --to "${{ steps.range.outputs.to }}" \
+            --published "${{ steps.range.outputs.published }}" \
+            --prices-dir data/out
+
+      - name: Publish the fetched dailies to R2
+        # Idempotent (ETag-dedup). Uploads whatever the sweep wrote; the
+        # refresh step folds those rows into the year rollup and prunes the
+        # daily keys.
         if: steps.traded.outputs.value == 'true'
         env:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
@@ -118,7 +168,7 @@ jobs:
             --data-dir data/out \
             --bucket tej-bazaar
 
-      - name: Refresh current-year rollup on R2
+      - name: Refresh the year rollups on R2
         # compact --refresh --from-r2 pulls the existing rollup + any daily
         # keys from R2, dedupes by (symbol, date), sorts by (symbol, date)
         # so DuckDB row-group stats prune ~99% of bytes on single-symbol
@@ -132,18 +182,23 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
-          YEAR="${{ steps.year.outputs.value }}"
-          tej-bazaar compact --year "$YEAR" --exchange both \
-            --from-r2 --refresh --bucket tej-bazaar
-          tej-bazaar publish-r2 --data-dir data/out --bucket tej-bazaar
-          for ex in nse bse; do
-            tej-bazaar r2-prune --prefix "$ex/year=$YEAR/month=" \
-              --bucket tej-bazaar --yes
+          # Every year the sweep touched, so a range across a year end is not
+          # half compacted.
+          for YEAR in ${{ steps.traded.outputs.years }}; do
+            tej-bazaar compact --year "$YEAR" --exchange both \
+              --from-r2 --refresh --bucket tej-bazaar
           done
-          # Drop the local dailies too: their rows now live in the rollup.
-          # Otherwise the HF publish below would carry rollup AND dailies,
-          # double-counting those dates for anyone who globs the year.
-          rm -rf data/out/nse/year="$YEAR"/month=* data/out/bse/year="$YEAR"/month=*
+          tej-bazaar publish-r2 --data-dir data/out --bucket tej-bazaar
+          for YEAR in ${{ steps.traded.outputs.years }}; do
+            for ex in nse bse; do
+              tej-bazaar r2-prune --prefix "$ex/year=$YEAR/month=" \
+                --bucket tej-bazaar --yes
+            done
+            # Drop the local dailies too: their rows now live in the rollup.
+            # Otherwise the HF publish below would carry rollup AND dailies,
+            # double-counting those dates for anyone who globs the year.
+            rm -rf data/out/nse/year="$YEAR"/month=* data/out/bse/year="$YEAR"/month=*
+          done
 
       - name: Export edge JSON (ohlcv + snapshots)
         # Pull every year's rollup so per-symbol OHLCV JSON carries full
@@ -178,7 +233,7 @@ jobs:
           TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           echo "published_at=$TS" >> "$GITHUB_OUTPUT"
           tej-bazaar status write --stage prices \
-            --trading-date "${{ steps.date.outputs.value }}" \
+            --trading-date "${{ steps.traded.outputs.date }}" \
             --prices-published-at "$TS" \
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --out data/status/api/v1/status.json
@@ -198,13 +253,13 @@ jobs:
             --delete-pattern "nse/year=*/month=*" \
             --delete-pattern "bse/year=*/month=*" \
             --card hf/README.md \
-            -m "daily: ${{ steps.date.outputs.value }} NSE+BSE prices"
+            -m "daily: ${{ steps.traded.outputs.date }} NSE+BSE prices"
 
       - name: Summary
         if: always()
         run: |
           {
-            echo "## prices: ${{ steps.date.outputs.value }}"
+            echo "## prices: ${{ steps.traded.outputs.date }}"
             echo ""
             files=$(find data/out -name "*.parquet" 2>/dev/null | sort)
             if [ -n "$files" ]; then

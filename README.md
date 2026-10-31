@@ -41,7 +41,8 @@ A face value split, a scheme of arrangement or a re-listing issues a new ISIN fo
 ### Output trees
 
 Seven parquet trees are produced and published, each under its own top-level
-prefix on R2 and HuggingFace, plus a JSON tree for the API edge.
+prefix on R2 and HuggingFace, plus an F&O tree in a private bucket for the
+paid API and a JSON tree for the API edge.
 
 #### 1. Bhavcopy (`nse/`, `bse/`)
 
@@ -165,7 +166,36 @@ delivery anyway.
 | `delivery_qty` | Int64 | Deliverable quantity, gross across client level |
 | `delivery_pct` | Float64 | `delivery_qty / volume` in percent, as NSE publishes it (two decimals) |
 
-#### 8. API edge JSON (`api/v1/`, R2 only)
+#### 8. F&O (`fo/nse/`, private bucket, not on HuggingFace)
+
+NSE equity derivatives end-of-day bhavcopy: one row per contract per day for
+index and stock futures and options (and India VIX futures where NSE listed
+them), from 2010. `tej-bazaar fo backfill` reads both source formats (legacy
+`fo{DD}{MMM}{YYYY}bhav.csv` before 2024-07-08, UDiFF after) into one schema;
+on 2024-07-05, when NSE published both, every row matches. Same layout as
+`nse/`: `fo/nse/year=YYYY/nse_YYYY.parquet`, sorted by `(symbol, date)`.
+The cron's `fo` job writes it to the bucket in the `FO_BUCKET` repo variable,
+not to the public bucket or HF: F&O is served through the paid tej-api tiers.
+The pipeline is MIT, so you can build the same tree yourself from NSE.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `date` | Date | Trading date |
+| `instrument` | Utf8 | `FUTIDX`, `FUTSTK`, `OPTIDX`, `OPTSTK`, `FUTIVX` |
+| `symbol` | Utf8 | Underlying, e.g. `NIFTY`, `RELIANCE` |
+| `expiry` | Date | Contract expiry |
+| `strike` | Float64 | Strike price; null for futures |
+| `option_type` | Utf8 | `CE`, `PE` (`CA`, `PA` for American-style stock options before 2011); null for futures |
+| `open`, `high`, `low`, `close` | Float64 | Day's prices |
+| `settle_price` | Float64 | Exchange settlement price |
+| `contracts` | Int64 | Contracts traded |
+| `turnover` | Float64 | Traded value in rupees (legacy files give lakhs to two decimals, so rupee precision is about 1,000) |
+| `open_interest` | Int64 | Open interest in units of the underlying |
+| `oi_change` | Int64 | Change in open interest |
+| `last`, `prev_close`, `underlying` | Float64 | UDiFF only (2024-07-08 on), null before |
+| `trades`, `lot_size` | Int64 | UDiFF only, null before |
+
+#### 9. API edge JSON (`api/v1/`, R2 only)
 
 `tej-bazaar export-json` pre-renders the tej-api free tier as static JSON:
 `api/v1/ohlcv/<ex>/<SYMBOL>.json` (full history per symbol),
@@ -248,6 +278,7 @@ pip install -e ".[dev]"
 | `tej-bazaar backfill --from D --to D` | Range; skips weekends + NSE/BSE holidays automatically |
 | `tej-bazaar backfill --from D --to D --exchange both` | Range, both exchanges |
 | `tej-bazaar delivery backfill --from D --to D` | NSE delivery quantity and % into `data/out/delivery/nse/`, one second between downloads (`--sleep`); also every date `data/out/nse/` has (`--prices-dir`), as the calendar misses special weekend sessions; 2010 to today is about 4,150 files and 90 minutes |
+| `tej-bazaar fo backfill --from D --to D` | NSE F&O bhavcopy, both formats, into `data/out/fo/nse/`; same day selection and `--sleep` as `delivery backfill`; about 0.5 MB of parquet per day |
 | `tej-bazaar actions fetch --year 2024 --exchange both` | Pull NSE+BSE corporate actions for a calendar year (annual rolling file) |
 | `tej-bazaar actions reparse --actions-dir data/out/actions` | Rewrite stored action files in place, re-extracting cash, ratio and face values from `raw_subject`; idempotent, the cron runs it before adjust |
 | `tej-bazaar actions adjust --year 2024 --exchange NSE` | Compute back-adjusted prices from bhavcopy + actions (single year) |

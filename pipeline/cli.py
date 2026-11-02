@@ -4,6 +4,7 @@ Commands:
     tej-bazaar fetch DATE [--exchange NSE|BSE|both]
     tej-bazaar backfill --from D --to D [--exchange NSE|BSE|both]
     tej-bazaar delivery backfill --from D --to D [--sleep SECONDS]
+    tej-bazaar fo backfill --from D --to D [--sleep SECONDS]
     tej-bazaar info [--data-dir PATH]
     tej-bazaar actions fetch (--year YYYY | --from D --to D) [--exchange NSE|BSE|both]
     tej-bazaar actions adjust (--year YYYY | --all-years) [--exchange NSE|BSE|both]
@@ -17,6 +18,7 @@ Commands:
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -55,6 +57,7 @@ from pipeline.fetch import (
     fetch_bse,
     fetch_nse,
 )
+from pipeline.fo import FO_KEY, fetch_nse_fo, fo_csv_name, parse_fo
 from pipeline.parse import parse_bhavcopy
 from pipeline.publish import DEFAULT_REPO_ID, PublishError, publish_to_hf
 from pipeline.publish_r2 import DEFAULT_BUCKET as DEFAULT_R2_BUCKET
@@ -82,6 +85,7 @@ DEFAULT_SYMBOL_HISTORY_DIR = Path("data/out/symbol_history")
 DEFAULT_METRICS_DIR = Path("data/out/metrics")
 DEFAULT_UNIVERSE_DIR = Path("data/out/universe")
 DEFAULT_DELIVERY_OUT_DIR = Path("data/out/delivery")
+DEFAULT_FO_OUT_DIR = Path("data/out/fo")
 
 
 class ExchangeChoice(str, Enum):
@@ -600,6 +604,36 @@ def delivery_backfill(
     if end < start:
         raise typer.BadParameter("--to must be on or after --from")
 
+    _nse_file_backfill(
+        "delivery",
+        start,
+        end,
+        out_dir=out_dir,
+        prices_dir=prices_dir,
+        skip_existing=skip_existing,
+        sleep_between=sleep_between,
+        cached=lambda d: (raw_dir / "nse" / f"MTO_{d:%d%m%Y}.DAT").exists(),
+        load=lambda d: parse_mto(fetch_nse_delivery(d, raw_dir / "nse"), d),
+    )
+
+
+def _nse_file_backfill(
+    label: str,
+    start: date,
+    end: date,
+    *,
+    out_dir: Path,
+    prices_dir: Path,
+    skip_existing: bool,
+    sleep_between: float,
+    cached: Callable[[date], bool],
+    load: Callable[[date], pl.DataFrame],
+) -> None:
+    """Shared day loop for per-day NSE files (delivery, F&O) written under `<out_dir>/nse/`.
+
+    Days are the NSE calendar's sessions plus every date `<prices_dir>/nse/`
+    has. A 404 counts as skipped, and no per-day failure stops the loop.
+    """
     priced = {d for d in _dates_on_disk(prices_dir / "nse") if start <= d <= end}
     sessions = sorted(set(_nse_days(start, end)) | priced)
     console.print(
@@ -616,21 +650,20 @@ def delivery_backfill(
         TimeElapsedColumn(),
         console=console,
     ) as progress:
-        task = progress.add_task("delivery", total=len(sessions))
+        task = progress.add_task(label, total=len(sessions))
         for d in sessions:
             if skip_existing and partition_path(out_dir, "NSE", d).exists():
                 counts["skipped"] += 1
                 progress.update(task, advance=1, description=f"[dim]skip[/dim]    NSE {d}")
                 continue
             # Only a download waits; a cached file needs no request.
-            if not (raw_dir / "nse" / f"MTO_{d:%d%m%Y}.DAT").exists():
+            if not cached(d):
                 if attempted:
                     time.sleep(sleep_between)
                 attempted += 1
-            progress.update(task, description=f"[cyan]NSE[/cyan] delivery {d}")
+            progress.update(task, description=f"[cyan]NSE[/cyan] {label} {d}")
             try:
-                df = parse_mto(fetch_nse_delivery(d, raw_dir / "nse"), d)
-                write_partitioned(df, out_dir, "NSE")
+                write_partitioned(load(d), out_dir, "NSE")
                 counts["ok"] += 1
             except BhavcopyNotFoundError as e:
                 counts["skipped"] += 1
@@ -643,13 +676,71 @@ def delivery_backfill(
                 console.print(f"  [red]error[/red] NSE {d}: {type(e).__name__}: {e}")
             progress.update(task, advance=1)
 
-    summary = Table(title="delivery backfill summary", border_style="cyan")
+    summary = Table(title=f"{label} backfill summary", border_style="cyan")
     summary.add_column("Exchange", style="bold")
     summary.add_column("Written", justify="right", style="green")
     summary.add_column("Skipped", justify="right", style="yellow")
     summary.add_column("Failed", justify="right", style="red")
     summary.add_row("NSE", str(counts["ok"]), str(counts["skipped"]), str(counts["failed"]))
     console.print(summary)
+
+
+fo_app = typer.Typer(
+    name="fo",
+    help="NSE equity derivatives (futures and options) end-of-day bhavcopy.",
+    no_args_is_help=True,
+)
+app.add_typer(fo_app)
+
+
+@fo_app.command("backfill")
+def fo_backfill(
+    from_date: Annotated[str, typer.Option("--from", help="Start date YYYY-MM-DD")],
+    to_date: Annotated[str, typer.Option("--to", help="End date YYYY-MM-DD (inclusive)")],
+    raw_dir: Annotated[Path, typer.Option("--raw-dir")] = DEFAULT_RAW_DIR,
+    out_dir: Annotated[Path, typer.Option("--out-dir")] = DEFAULT_FO_OUT_DIR,
+    prices_dir: Annotated[
+        Path,
+        typer.Option(
+            "--prices-dir",
+            help="Root of partitioned bhavcopy parquet; every date `nse/` has is fetched too",
+        ),
+    ] = DEFAULT_OUT_DIR,
+    skip_existing: Annotated[
+        bool,
+        typer.Option(
+            "--skip-existing/--overwrite",
+            help="Skip dates whose parquet already exists",
+        ),
+    ] = True,
+    sleep_between: Annotated[
+        float,
+        typer.Option("--sleep", help="Seconds to wait between downloads (politeness to NSE archives)"),
+    ] = 1.0,
+) -> None:
+    """Fetch the NSE F&O bhavcopy over a date range into `<out-dir>/nse/`.
+
+    One row per contract per day, both source formats mapped onto one schema
+    (`pipeline.fo.FO_SCHEMA`). Same day selection and failure handling as
+    `delivery backfill`.
+    """
+    _banner()
+    start = _parse_date(from_date)
+    end = _parse_date(to_date)
+    if end < start:
+        raise typer.BadParameter("--to must be on or after --from")
+    fo_raw = raw_dir / "nse_fo"
+    _nse_file_backfill(
+        "fo",
+        start,
+        end,
+        out_dir=out_dir,
+        prices_dir=prices_dir,
+        skip_existing=skip_existing,
+        sleep_between=sleep_between,
+        cached=lambda d: (fo_raw / fo_csv_name(d)).exists(),
+        load=lambda d: parse_fo(fetch_nse_fo(d, fo_raw), d),
+    )
 
 
 actions_app = typer.Typer(
@@ -1772,12 +1863,15 @@ def compact(
             # When --from-r2 includes the existing rollup AND any new daily
             # files (current-year refresh path), the same (symbol, date) can
             # show up twice. Drop duplicates so we keep one row per cell.
-            df = df.unique(subset=["symbol", "date"], keep="first")
+            # An F&O tree has many contracts per (symbol, date), so its key
+            # is the whole contract.
+            key = FO_KEY if "expiry" in df.columns else ["symbol", "date"]
+            df = df.unique(subset=key, keep="first")
             # Sort by (symbol, date) so parquet row-group min/max stats on
             # `symbol` cluster tightly. Single-symbol OHLCV queries can then
             # skip every row group whose symbol range excludes the target,
             # turning a ~30 MB-per-year scan into ~50 kB per year.
-            df = df.sort(["symbol", "date"])
+            df = df.sort(["symbol", "date", *(c for c in key if c not in ("symbol", "date"))], nulls_last=True)
             rollup_path.parent.mkdir(parents=True, exist_ok=True)
             df.write_parquet(rollup_path, compression="zstd")
         finally:

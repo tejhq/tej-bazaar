@@ -126,21 +126,20 @@ adjusted-close layer alongside raw.
 - [x] `tej-sdk-py`: thin Python client over the API, published as `tejhq` 0.3.0 on PyPI
 - [x] `tej-sdk-ts`: TypeScript client, published as `tejhq` 0.1.0 on npm
 
-## Phase 7 - EOD F&O (NEXT, TOP PRIORITY)
+## Phase 7 - EOD F&O (IN PROGRESS, TOP PRIORITY)
 
-Daily NSE derivatives bhavcopy: one row per contract per day (futures and options on indices and stocks). Same public archive and legal footing as the equity bhavcopy. Not tick or intraday data.
+Daily NSE derivatives bhavcopy: one row per contract per day (futures and options on indices and stocks). Same public archive and legal footing as the equity bhavcopy. Not tick or intraday data. Paid API dataset: published to a private bucket (`FO_BUCKET`), not to HF or the public bucket.
 
-- [ ] Fetcher, two formats (verify URLs against live archive first):
-  - Legacy: `archives.nseindia.com/content/historical/DERIVATIVES/{yyyy}/{MMM}/fo{dd}{MMM}{yyyy}bhav.csv.zip` (INSTRUMENT, SYMBOL, EXPIRY_DT, STRIKE_PR, OPTION_TYP, OHLC, SETTLE_PR, CONTRACTS, VAL_INLAKH, OPEN_INT, CHG_IN_OI)
-  - UDiFF from 2024-07-08: `nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{yyyymmdd}_F_0000.csv.zip`
-- [ ] Parser to one schema: date, instrument (FUTIDX/FUTSTK/OPTIDX/OPTSTK), symbol, expiry, strike, option_type (CE/PE/null), open, high, low, close, settle, contracts, lot_size, turnover, open_interest, oi_change, underlying_close
-- [ ] Cross-format check: overlap days around the cutover parse to identical rows
-- [ ] Lot size per contract (UDiFF has it; legacy needs NSE lot-size circulars or contracts vs quantity)
-- [ ] Output `fo/year=YYYY/` parquet, sorted by symbol, expiry, strike for pruning. Est. 50k to 100k rows/day, a few GB for full history
-- [ ] Backfill from 2010 (local, user-run), then wire into `prices` cron job; warn on missing file, fail after 3 trading days
-- [ ] Publish to R2 and HF `tejhq/indian-markets` under `fo/`
-- [ ] Serving in tej-api (paid tiers): `/v1/fo/chain/{symbol}?date=&expiry=`, `/v1/fo/futures/{symbol}`, `/v1/fo/contract` history
-- [ ] Later: derived PCR, max pain, OI buildup, continuous futures with roll
+- [x] Fetcher, two formats: legacy `fo{DD}{MMM}{YYYY}bhav.csv.zip` before 2024-07-08, UDiFF `BhavCopy_NSE_FO_..._F_0000.csv.zip` from then (`pipeline/fo.py`)
+- [x] Parser to one schema (`FO_SCHEMA`): date, instrument, symbol, expiry, strike, option_type, OHLC, settle, contracts, turnover (rupees), open_interest, oi_change, plus UDiFF-only last, prev_close, underlying, trades, lot_size. Rejects a wrong trade date, unknown instrument or repeated contract
+- [x] Cross-format check: 2024-07-05 exists in both formats, all 33,930 rows match (turnover within the legacy file's 1,000-rupee precision)
+- [x] `tej-bazaar fo backfill`, sharing the day loop with `delivery backfill`; `compact` dedupes F&O on the whole contract key
+- [x] `fo` cron job: fetch, fold into the year rollup on `FO_BUCKET`, warn on a late file, fail after 3 trading days. Skipped while `FO_BUCKET` is unset
+- [ ] Backfill from 2010 (local, user-run) into `FO_BUCKET`
+- [ ] Legacy lot sizes (pre 2024-07-08): derive from open interest, which is always a multiple of the lot, or from NSE lot-size circulars
+- [ ] Serving in tej-api (Retail and Pro only): `/v1/fo/chain/{symbol}?date=&expiry=`, `/v1/fo/futures/{symbol}`, `/v1/fo/contract` history, `/v1/fo/expiries/{symbol}`
+- [ ] Later: derived PCR, max pain, OI buildup, rollover %, continuous futures with roll, implied volatility and greeks
+- [ ] Later: BSE derivatives (SENSEX, BANKEX options)
 - Out of scope: tick and 1-minute data (no public source, NSE sells it)
 
 ## Phase 8 - MCP server (after F&O)

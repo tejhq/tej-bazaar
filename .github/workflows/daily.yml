@@ -49,6 +49,10 @@ concurrency:
 #   delivery - NSE delivery positions over the same sweep, into
 #             delivery/nse/. A late file is a warning; one still missing
 #             three trading days on fails the run.
+#   fo      - NSE F&O bhavcopy over the same sweep, into fo/nse/ in the
+#             private bucket named by the FO_BUCKET repo variable. Not on
+#             HF or the public bucket: F&O is a paid API dataset. Skipped
+#             while FO_BUCKET is unset.
 # A derived or delivery failure never blocks prices, but it DOES fail the
 # run so GitHub emails on it. No continue-on-error anywhere except the flaky
 # NSE corp-actions website fetch, which falls back to the actions
@@ -544,10 +548,81 @@ jobs:
             --due-hour 18 \
             --grace 3
 
+  fo:
+    # NSE F&O end-of-day bhavcopy, one row per contract per day, published to
+    # the private FO_BUCKET only (never HF, never the public tej-bazaar bucket,
+    # which data.tejhq.dev serves). Same fold as delivery. The file lands with
+    # the equity bhavcopy, so the check's due hour matches prices.
+    needs: prices
+    if: ${{ !cancelled() && needs.prices.outputs.from != '' && vars.FO_BUCKET != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      FO_BUCKET: ${{ vars.FO_BUCKET }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          python-version: '3.11'
+          enable-cache: false
+          activate-environment: true
+
+      - name: Install pipeline
+        run: uv sync --locked
+
+      - name: Pull the F&O rollups already published
+        run: |
+          FROM="${{ needs.prices.outputs.from }}"
+          TO="${{ needs.prices.outputs.to }}"
+          for YEAR in $(seq "${FROM%%-*}" "${TO%%-*}"); do
+            tej-bazaar pull-r2 --prefix "fo/nse/year=$YEAR/" \
+              --data-dir data/out --bucket "$FO_BUCKET"
+          done
+
+      - name: Fetch NSE F&O
+        id: fetched
+        run: |
+          tej-bazaar fo backfill \
+            --from "${{ needs.prices.outputs.from }}" \
+            --to "${{ needs.prices.outputs.to }}" \
+            --out-dir data/out/fo
+          YEARS=$(find data/out/fo -name 'date=*.parquet' \
+            | sed -n 's|.*/year=\([0-9]\{4\}\)/.*|\1|p' | sort -u | tr '\n' ' ')
+          echo "years=$YEARS" >> "$GITHUB_OUTPUT"
+
+      - name: Refresh the F&O year rollups on R2
+        if: steps.fetched.outputs.years != ''
+        run: |
+          tej-bazaar publish-r2 --data-dir data/out --bucket "$FO_BUCKET"
+          for YEAR in ${{ steps.fetched.outputs.years }}; do
+            tej-bazaar compact --year "$YEAR" --exchange NSE \
+              --data-dir data/out/fo --prefix fo \
+              --from-r2 --refresh --bucket "$FO_BUCKET"
+          done
+          tej-bazaar publish-r2 --data-dir data/out --bucket "$FO_BUCKET"
+          for YEAR in ${{ steps.fetched.outputs.years }}; do
+            tej-bazaar r2-prune --prefix "fo/nse/year=$YEAR/month=" \
+              --bucket "$FO_BUCKET" --yes
+            rm -rf data/out/fo/nse/year="$YEAR"/month=*
+          done
+
+      - name: F&O may lag, but not by three trading days
+        run: |
+          tej-bazaar check-sessions \
+            --from "${{ needs.prices.outputs.from }}" \
+            --to "${{ needs.prices.outputs.to }}" \
+            --prices-dir data/out/fo \
+            --due-hour 20 \
+            --grace 3
+
   alert:
     # Optional webhook (Discord/Slack-compatible JSON). GitHub already emails
     # the workflow's last committer on scheduled-run failure; this is extra.
-    needs: [prices, derived, delivery]
+    needs: [prices, derived, delivery, fo]
     if: failure() || cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -560,5 +635,5 @@ jobs:
             echo "ALERT_WEBHOOK_URL not set; skipping webhook"; exit 0
           fi
           curl -fsS -X POST -H 'Content-Type: application/json' "$WEBHOOK" -d @- <<JSON
-          {"content":"tej-bazaar daily FAILED for ${{ needs.prices.outputs.date }}: prices=${{ needs.prices.result }} derived=${{ needs.derived.result }} delivery=${{ needs.delivery.result }} ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}
+          {"content":"tej-bazaar daily FAILED for ${{ needs.prices.outputs.date }}: prices=${{ needs.prices.result }} derived=${{ needs.derived.result }} delivery=${{ needs.delivery.result }} fo=${{ needs.fo.result }} ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}
           JSON

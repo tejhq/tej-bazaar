@@ -150,3 +150,13 @@ def test_compact_keeps_every_contract(tmp_path: Path):
     assert rollup.select(FO_KEY).is_duplicated().sum() == 0
     keys = rollup.select("symbol", "date")
     assert keys.equals(keys.sort("symbol", "date"))
+
+
+def test_parse_fo_reissued_two_digit_years_and_footer():
+    # Trimmed from the real re-issued fo14MAY2012bhav.csv: 14-May-12 dates and
+    # a trailing blank line plus "*Updated".
+    fixture = Path(__file__).parent / "fixtures" / "nse_fo_20120514_reissued_sample.csv"
+    df = parse_fo(fixture, date(2012, 5, 14))
+    assert df.height == 3
+    assert set(df["date"]) == {date(2012, 5, 14)}
+    assert sorted(set(df["expiry"])) == [date(2012, 5, 31), date(2012, 6, 28), date(2012, 7, 26)]

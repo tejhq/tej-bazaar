@@ -122,6 +122,8 @@ def parse_fo(path: Path, d: date) -> pl.DataFrame:
     else:
         raise FoParseError(f"{path.name}: unrecognised header {raw.columns[:5]}")
 
+    if df["expiry"].null_count():
+        raise FoParseError(f"{path.name}: {df['expiry'].null_count()} rows with an unreadable expiry")
     dates = df["date"].unique().to_list()
     if dates != [d]:
         raise FoParseError(f"{path.name}: trade dates {dates} are not [{d}]")
@@ -165,14 +167,29 @@ def _parse_udiff(raw: pl.DataFrame) -> pl.DataFrame:
     ).cast(FO_SCHEMA)
 
 
+def _legacy_date(col: str) -> pl.Expr:
+    # Most files use 04-JAN-2010; some re-issued ones (2012-05-14) use 14-May-12.
+    s = pl.col(col).str.strip_chars().str.to_titlecase()
+    return (
+        pl.when(s.str.len_chars() == 9)
+        .then(s.str.to_date("%d-%b-%y", strict=False))
+        .otherwise(s.str.to_date("%d-%b-%Y", strict=False))
+    )
+
+
 def _parse_legacy(raw: pl.DataFrame) -> pl.DataFrame:
+    # Re-issued files end with blank and "*Updated" lines.
+    raw = raw.filter(
+        pl.col("SYMBOL").str.strip_chars().fill_null("") != "",
+        ~pl.col("INSTRUMENT").str.strip_chars().fill_null("*").str.starts_with("*"),
+    )
     inst = pl.col("INSTRUMENT").str.strip_chars()
     is_opt = inst.str.starts_with("OPT")
     return raw.select(
-        pl.col("TIMESTAMP").str.strip_chars().str.to_titlecase().str.to_date("%d-%b-%Y").alias("date"),
+        _legacy_date("TIMESTAMP").alias("date"),
         inst.alias("instrument"),
         pl.col("SYMBOL").str.strip_chars().alias("symbol"),
-        pl.col("EXPIRY_DT").str.strip_chars().str.to_titlecase().str.to_date("%d-%b-%Y").alias("expiry"),
+        _legacy_date("EXPIRY_DT").alias("expiry"),
         pl.when(is_opt).then(_num("STRIKE_PR", pl.Float64)).alias("strike"),
         pl.when(is_opt).then(pl.col("OPTION_TYP").str.strip_chars()).alias("option_type"),
         _num("OPEN", pl.Float64).alias("open"),

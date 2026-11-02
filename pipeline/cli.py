@@ -3,7 +3,7 @@
 Commands:
     tej-bazaar fetch DATE [--exchange NSE|BSE|both]
     tej-bazaar backfill --from D --to D [--exchange NSE|BSE|both]
-    tej-bazaar delivery backfill --from D --to D [--sleep SECONDS]
+    tej-bazaar delivery backfill --from D --to D [--exchange NSE|BSE|both] [--sleep SECONDS]
     tej-bazaar fo backfill --from D --to D [--sleep SECONDS]
     tej-bazaar info [--data-dir PATH]
     tej-bazaar actions fetch (--year YYYY | --from D --to D) [--exchange NSE|BSE|both]
@@ -50,7 +50,7 @@ from pipeline.actions import (
     resolve_isin_via_symbol_history,
     to_polars as actions_to_polars,
 )
-from pipeline.delivery import fetch_nse_delivery, parse_mto
+from pipeline.delivery import fetch_bse_delivery, fetch_nse_delivery, parse_mto, parse_scbseall
 from pipeline.fetch import (
     BhavcopyFetchError,
     BhavcopyNotFoundError,
@@ -63,7 +63,7 @@ from pipeline.publish import DEFAULT_REPO_ID, PublishError, publish_to_hf
 from pipeline.publish_r2 import DEFAULT_BUCKET as DEFAULT_R2_BUCKET
 from pipeline.publish_r2 import PublishError as PublishR2Error
 from pipeline.publish_r2 import prune_r2_prefix, publish_to_r2, pull_from_r2
-from pipeline.push import partition_path, write_partitioned
+from pipeline.push import Exchange, partition_path, write_partitioned
 from pipeline.actions.schema import ACTION_SCHEMA
 from pipeline.reconcile import (
     YahooFetchError,
@@ -414,7 +414,7 @@ def check_sessions(
 
     With `--grace N` a missing session only emits a `::warning::` until the
     due hour N trading days later, then fails. The delivery job uses this: a
-    late MTO file must not fail the run, but a source that stays broken must.
+    late delivery file must not fail the run, but a source that stays broken must.
     Days inside a year rollup count as present, as do daily files.
     """
     _banner()
@@ -571,7 +571,7 @@ def publish(
 
 delivery_app = typer.Typer(
     name="delivery",
-    help="NSE delivery quantity and delivery % per security, from the MTO file.",
+    help="Delivery quantity and delivery % per security, from NSE's MTO and BSE's SCBSEALL files.",
     no_args_is_help=True,
 )
 app.add_typer(delivery_app)
@@ -581,13 +581,18 @@ app.add_typer(delivery_app)
 def delivery_backfill(
     from_date: Annotated[str, typer.Option("--from", help="Start date YYYY-MM-DD")],
     to_date: Annotated[str, typer.Option("--to", help="End date YYYY-MM-DD (inclusive)")],
+    exchange: Annotated[
+        ExchangeChoice,
+        typer.Option("--exchange", "-e", help="Exchange to backfill", case_sensitive=False),
+    ] = ExchangeChoice.NSE,
     raw_dir: Annotated[Path, typer.Option("--raw-dir")] = DEFAULT_RAW_DIR,
     out_dir: Annotated[Path, typer.Option("--out-dir")] = DEFAULT_DELIVERY_OUT_DIR,
     prices_dir: Annotated[
         Path,
         typer.Option(
             "--prices-dir",
-            help="Root of partitioned bhavcopy parquet; every date `nse/` has is fetched too",
+            help="Root of partitioned bhavcopy parquet; every date `nse/` or `bse/` has "
+            "is fetched too",
         ),
     ] = DEFAULT_OUT_DIR,
     skip_existing: Annotated[
@@ -599,17 +604,21 @@ def delivery_backfill(
     ] = True,
     sleep_between: Annotated[
         float,
-        typer.Option("--sleep", help="Seconds to wait between downloads (politeness to NSE archives)"),
+        typer.Option(
+            "--sleep", help="Seconds to wait between downloads (politeness to the exchanges)"
+        ),
     ] = 1.0,
 ) -> None:
-    """Fetch NSE delivery positions over a date range into `<out-dir>/nse/`.
+    """Fetch delivery positions over a date range into `<out-dir>/nse/` and `<out-dir>/bse/`.
 
     Works like `backfill`: non-trading days are skipped, a 404 (not published
     yet) counts as skipped, and no per-day failure stops the loop or fails the
-    command. The days are the NSE calendar's sessions plus every date that
-    `<prices-dir>/nse/` has, because the calendar misses special weekend
-    sessions such as 2024-01-20. 2010 to 2026 is about 4,150 files, roughly
-    90 minutes at the default `--sleep`.
+    command. The days are the calendar's sessions plus every date that
+    `<prices-dir>/<ex>/` has, so a session the calendar lacks is still
+    fetched. A BSE day also needs that day's bhavcopy,
+    from `<raw-dir>/bse/` or downloaded. NSE 2010 to 2026 is about 4,150
+    files, roughly 90 minutes at the default `--sleep`; BSE from 2024-07-08
+    is about 570 days of two files each, roughly 25 minutes.
     """
     _banner()
     start = _parse_date(from_date)
@@ -617,24 +626,59 @@ def delivery_backfill(
     if end < start:
         raise typer.BadParameter("--to must be on or after --from")
 
-    _nse_file_backfill(
-        "delivery",
-        start,
-        end,
-        out_dir=out_dir,
-        prices_dir=prices_dir,
-        skip_existing=skip_existing,
-        sleep_between=sleep_between,
-        cached=lambda d: (raw_dir / "nse" / f"MTO_{d:%d%m%Y}.DAT").exists(),
-        load=lambda d: parse_mto(fetch_nse_delivery(d, raw_dir / "nse"), d),
-    )
+    exchanges = _exchanges(exchange)
+    if "NSE" in exchanges:
+        _file_backfill(
+            "delivery",
+            start,
+            end,
+            out_dir=out_dir,
+            prices_dir=prices_dir,
+            skip_existing=skip_existing,
+            sleep_between=sleep_between,
+            cached=lambda d: (raw_dir / "nse" / f"MTO_{d:%d%m%Y}.DAT").exists(),
+            load=lambda d: parse_mto(fetch_nse_delivery(d, raw_dir / "nse"), d),
+        )
+    if "BSE" in exchanges:
+        _file_backfill(
+            "delivery",
+            start,
+            end,
+            exchange="BSE",
+            out_dir=out_dir,
+            prices_dir=prices_dir,
+            skip_existing=skip_existing,
+            sleep_between=sleep_between,
+            cached=lambda d: all(p.exists() for p in _bse_delivery_files(d, raw_dir)),
+            load=lambda d: _load_bse_delivery(d, raw_dir, sleep_between),
+        )
 
 
-def _nse_file_backfill(
+def _bse_delivery_files(d: date, raw_dir: Path) -> tuple[Path, Path]:
+    """A BSE day's SCBSEALL text file and bhavcopy, as cached under `<raw_dir>/bse/`."""
+    sub = raw_dir / "bse"
+    return sub / f"SCBSEALL{d:%d%m%Y}.TXT", sub / f"BhavCopy_BSE_CM_0_0_0_{d:%Y%m%d}_F_0000.csv"
+
+
+def _load_bse_delivery(d: date, raw_dir: Path, sleep_between: float) -> pl.DataFrame:
+    """One BSE day's delivery rows: SCBSEALL, then the bhavcopy naming its scrip codes.
+
+    The bhavcopy is fetched only once SCBSEALL exists. The day loop waits
+    before the day's first download; this waits again before the second.
+    """
+    both = not any(p.exists() for p in _bse_delivery_files(d, raw_dir))
+    scbseall = fetch_bse_delivery(d, raw_dir / "bse")
+    if both:
+        time.sleep(sleep_between)
+    return parse_scbseall(scbseall, d, fetch_bse(d, raw_dir / "bse", check_calendar=False))
+
+
+def _file_backfill(
     label: str,
     start: date,
     end: date,
     *,
+    exchange: Exchange = "NSE",
     out_dir: Path,
     prices_dir: Path,
     skip_existing: bool,
@@ -642,12 +686,13 @@ def _nse_file_backfill(
     cached: Callable[[date], bool],
     load: Callable[[date], pl.DataFrame],
 ) -> None:
-    """Shared day loop for per-day NSE files (delivery, F&O) written under `<out_dir>/nse/`.
+    """Shared day loop for per-day exchange files (delivery, F&O) written under `<out_dir>/<ex>/`.
 
-    Days are the NSE calendar's sessions plus every date `<prices_dir>/nse/`
-    has. A 404 counts as skipped, and no per-day failure stops the loop.
+    Days are the calendar's sessions (NSE and BSE share it) plus every date
+    `<prices_dir>/<ex>/` has. A 404 counts as skipped, and no per-day failure
+    stops the loop.
     """
-    priced = {d for d in _dates_on_disk(prices_dir / "nse") if start <= d <= end}
+    priced = {d for d in _dates_on_disk(prices_dir / exchange.lower()) if start <= d <= end}
     sessions = sorted(set(holidays.trading_days_between(start, end, "NSE")) | priced)
     console.print(
         f"[bold]{len(sessions)}[/bold] trading days in [cyan]{start}[/cyan] → [cyan]{end}[/cyan]"
@@ -665,28 +710,28 @@ def _nse_file_backfill(
     ) as progress:
         task = progress.add_task(label, total=len(sessions))
         for d in sessions:
-            if skip_existing and partition_path(out_dir, "NSE", d).exists():
+            if skip_existing and partition_path(out_dir, exchange, d).exists():
                 counts["skipped"] += 1
-                progress.update(task, advance=1, description=f"[dim]skip[/dim]    NSE {d}")
+                progress.update(task, advance=1, description=f"[dim]skip[/dim]    {exchange} {d}")
                 continue
             # Only a download waits; a cached file needs no request.
             if not cached(d):
                 if attempted:
                     time.sleep(sleep_between)
                 attempted += 1
-            progress.update(task, description=f"[cyan]NSE[/cyan] {label} {d}")
+            progress.update(task, description=f"[cyan]{exchange}[/cyan] {label} {d}")
             try:
-                write_partitioned(load(d), out_dir, "NSE")
+                write_partitioned(load(d), out_dir, exchange)
                 counts["ok"] += 1
             except BhavcopyNotFoundError as e:
                 counts["skipped"] += 1
-                console.print(f"  [yellow]missing[/yellow] NSE {d}: {e}")
+                console.print(f"  [yellow]missing[/yellow] {exchange} {d}: {e}")
             except BhavcopyFetchError as e:
                 counts["failed"] += 1
-                console.print(f"  [red]fail[/red] NSE {d}: {e}")
+                console.print(f"  [red]fail[/red] {exchange} {d}: {e}")
             except Exception as e:  # noqa: BLE001  # keep loop alive on any per-day error
                 counts["failed"] += 1
-                console.print(f"  [red]error[/red] NSE {d}: {type(e).__name__}: {e}")
+                console.print(f"  [red]error[/red] {exchange} {d}: {type(e).__name__}: {e}")
             progress.update(task, advance=1)
 
     summary = Table(title=f"{label} backfill summary", border_style="cyan")
@@ -694,7 +739,7 @@ def _nse_file_backfill(
     summary.add_column("Written", justify="right", style="green")
     summary.add_column("Skipped", justify="right", style="yellow")
     summary.add_column("Failed", justify="right", style="red")
-    summary.add_row("NSE", str(counts["ok"]), str(counts["skipped"]), str(counts["failed"]))
+    summary.add_row(exchange, str(counts["ok"]), str(counts["skipped"]), str(counts["failed"]))
     console.print(summary)
 
 
@@ -743,7 +788,7 @@ def fo_backfill(
     if end < start:
         raise typer.BadParameter("--to must be on or after --from")
     fo_raw = raw_dir / "nse_fo"
-    _nse_file_backfill(
+    _file_backfill(
         "fo",
         start,
         end,

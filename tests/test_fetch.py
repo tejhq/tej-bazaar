@@ -165,6 +165,20 @@ def test_fetch_bse_non_trading_day_raises(tmp_path: Path):
 
 
 @responses.activate
+def test_fetch_bse_without_the_calendar_check(tmp_path: Path):
+    # The calendar has no Saturday 2026-01-31. The delivery backfill picks
+    # its own days, so it asks BSE anyway.
+    responses.add(
+        responses.GET,
+        fetch.BSE_BHAVCOPY_URL.format(yyyymmdd="20260131"),
+        body=b"TradDt,TckrSymb\n2026-01-31,RELIANCE\n",
+        status=200,
+    )
+    out = fetch_bse(date(2026, 1, 31), tmp_path, check_calendar=False)
+    assert out == tmp_path / "BhavCopy_BSE_CM_0_0_0_20260131_F_0000.csv"
+
+
+@responses.activate
 def test_fetch_bse_html_response_treated_as_notfound(tmp_path: Path):
     # When a bhavcopy isn't published yet, BSE serves its homepage with status 200.
     # Must be detected as "not yet published", not parsed as CSV.

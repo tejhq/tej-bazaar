@@ -4,7 +4,7 @@
 
 Part of the [TejHQ](https://github.com/tejhq) ecosystem.
 
-> **Status:** NSE 2010 to today and BSE 2024-07-08 to today, live. A three-job GitHub Actions cron runs at 18:30 IST on trading days, with a 21:30 IST retry, and each run sweeps the last seven days so a late or missed run heals itself: `prices` folds the day into the year rollup and publishes to R2 and [`tejhq/indian-markets`](https://huggingface.co/datasets/tejhq/indian-markets); `derived` rebuilds corporate actions, symbol history, adjusted prices, metrics and the liquidity universe from full history; `delivery` adds NSE delivery quantity and delivery %. The first two jobs also pre-render the JSON that `api.tejhq.dev` serves at the edge. See [ROADMAP.md](./ROADMAP.md).
+> **Status:** NSE 2010 to today and BSE 2024-07-08 to today, live. A three-job GitHub Actions cron runs at 18:30 IST on trading days, with a 21:30 IST retry, and each run sweeps the last seven days so a late or missed run heals itself: `prices` folds the day into the year rollup and publishes to R2 and [`tejhq/indian-markets`](https://huggingface.co/datasets/tejhq/indian-markets); `derived` rebuilds corporate actions, symbol history, adjusted prices, metrics and the liquidity universe from full history; `delivery` adds NSE and BSE delivery quantity and delivery %. The first two jobs also pre-render the JSON that `api.tejhq.dev` serves at the edge. See [ROADMAP.md](./ROADMAP.md).
 
 ---
 
@@ -147,24 +147,29 @@ months it qualified for. This is a survivorship-bias-free backtest universe.
 
 `liquid100`, `liquid250` and `liquid500` are `rank <= N` filters over the same rows.
 
-#### 7. Delivery (`delivery/nse/`)
+#### 7. Delivery (`delivery/nse/`, `delivery/bse/`)
 
 How much of each day's traded quantity was delivered rather than squared off
-intraday, from NSE's security-wise delivery position file (`MTO_DDMMYYYY.DAT`,
-published around 16:30 IST). Same layout as `nse/`: one rollup per year,
-`delivery/nse/year=YYYY/nse_YYYY.parquet`, sorted by `(symbol, date)`, from
-2010. The file has no ISIN; join to `nse/` on `(date, symbol, series)`.
-Only `EQ` rows: the file carries no `BE`/`BZ` rows, which settle entirely by
-delivery anyway.
+intraday. Same layout as the bhavcopy: one rollup per exchange per year,
+`delivery/<ex>/year=YYYY/<ex>_YYYY.parquet`, sorted by `(symbol, date)`.
+Neither source has an ISIN; join to `nse/` or `bse/` on `(date, symbol, series)`.
+
+- `delivery/nse/`, from 2010, from NSE's security-wise delivery position file
+  (`MTO_DDMMYYYY.DAT`, published around 16:30 IST). Only `EQ` rows: the file
+  carries no `BE`/`BZ` rows, which settle entirely by delivery anyway.
+- `delivery/bse/`, from 2024-07-08 like `bse/`, from BSE's gross deliverables
+  file (`SCBSEALLDDMM.zip`, published around 18:15 to 20:30 IST), `A`/`B`/`T`
+  rows. The file is keyed by scrip code, which the same day's bhavcopy maps to
+  the symbol and series in `bse/`.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `date` | Date | Trading date |
 | `symbol` | Utf8 | Ticker |
-| `series` | Utf8 | `EQ` |
-| `volume` | Int64 | Quantity traded; equals `volume` in `nse/` |
-| `delivery_qty` | Int64 | Deliverable quantity, gross across client level |
-| `delivery_pct` | Float64 | `delivery_qty / volume` in percent, as NSE publishes it (two decimals) |
+| `series` | Utf8 | NSE: `EQ`, BSE: `A`/`B`/`T` |
+| `volume` | Int64 | Quantity traded; equals `volume` in `nse/` or `bse/` |
+| `delivery_qty` | Int64 | Deliverable quantity, gross (NSE: across client level) |
+| `delivery_pct` | Float64 | `delivery_qty / volume` in percent, as the exchange publishes it (two decimals) |
 
 #### 8. F&O (`fo/nse/`, private bucket, not on HuggingFace)
 
@@ -278,6 +283,7 @@ pip install -e ".[dev]"
 | `tej-bazaar backfill --from D --to D` | Range; skips weekends + NSE/BSE holidays automatically |
 | `tej-bazaar backfill --from D --to D --exchange both` | Range, both exchanges |
 | `tej-bazaar delivery backfill --from D --to D` | NSE delivery quantity and % into `data/out/delivery/nse/`, one second between downloads (`--sleep`); also every date `data/out/nse/` has (`--prices-dir`), as the calendar misses special weekend sessions; 2010 to today is about 4,150 files and 90 minutes |
+| `tej-bazaar delivery backfill --from D --to D --exchange BSE` | The same for BSE into `data/out/delivery/bse/`, plus every date `data/out/bse/` has; each day also needs that day's bhavcopy, reused from `data/raw/bse/` or downloaded; 2024-07-08 to today is about 570 days, two files each, and 25 minutes |
 | `tej-bazaar fo backfill --from D --to D` | NSE F&O bhavcopy, both formats, into `data/out/fo/nse/`; same day selection and `--sleep` as `delivery backfill`; about 0.5 MB of parquet per day |
 | `tej-bazaar actions fetch --year 2024 --exchange both` | Pull NSE+BSE corporate actions for a calendar year (annual rolling file) |
 | `tej-bazaar actions reparse --actions-dir data/out/actions` | Rewrite stored action files in place, re-extracting cash, ratio and face values from `raw_subject`; idempotent, the cron runs it before adjust |
@@ -335,6 +341,11 @@ NSE security-wise delivery position file (MTO, official EOD)
   → fetch (HTTP, browser headers, one second between downloads, idempotent)
   → parse (checked against the file's own record count and total, EQ rows)
   → write, compact, publish (delivery/nse/, same as the bhavcopy)
+
+BSE gross deliverables file (SCBSEALL, official EOD)
+  → fetch (the zip, then the day's bhavcopy for its scrip codes; one second between downloads, idempotent)
+  → parse (both files checked for the trade date, rows named by the bhavcopy, A/B/T rows)
+  → write, compact, publish (delivery/bse/, same as the bhavcopy)
 ```
 
 ### Daily cron
@@ -345,7 +356,7 @@ Each run sweeps the last seven calendar days rather than one date, because GitHu
 
 - `prices`: sweep the recent bhavcopies, publish, refresh the year rollup, prune dailies, export and publish edge JSON, write `api/v1/status.json`, publish to HuggingFace with the dataset card (`--card hf/README.md`). Skips cleanly on holidays.
 - `derived`: pull full history from R2, refresh corporate actions, rebuild symbol history, reparse actions, rebuild adjusted prices, metrics (year files, `_latest`, and R2-only month slices under `data/api/metrics`) and universe into `data/derived/`, publish that directory only, then rewrite `status.json` with `derived_published_at`. A failure here publishes nothing stale and fails the run, so GitHub emails on it. Only the NSE corporate-actions website fetch is allowed to fail, falling back to the history already on R2.
-- `delivery`: after `prices`, and even when it failed, fetch NSE's delivery file for the same seven days, fold it into the `delivery/nse/` year rollup on R2 and publish to HuggingFace. A file still missing at 18:00 IST gets a `::warning::` and the next run's sweep fetches it; `check-sessions --due-hour 18 --grace 3` fails the run once a session is still missing at 18:00 IST three trading days later.
+- `delivery`: after `prices`, and even when it failed, fetch NSE's and BSE's delivery files for the same seven days, fold them into the `delivery/nse/` and `delivery/bse/` year rollups on R2 and publish to HuggingFace. A file still missing at its due hour, 18:00 IST for NSE and 21:00 IST for BSE, gets a `::warning::` and the next run's sweep fetches it; `check-sessions --grace 3` fails the run once a session is still missing at that hour three trading days later.
 
 Manual runs: `gh workflow run daily-bhavcopy -f date=YYYY-MM-DD`, `-f from=D -f to=D` to backfill a range, or `-f lookback=30` to widen the sweep. Set the `ALERT_WEBHOOK_URL` secret for Discord or Slack failure pings.
 

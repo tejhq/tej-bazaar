@@ -1,3 +1,5 @@
+import io
+import zipfile
 from datetime import date
 from pathlib import Path
 
@@ -6,13 +8,23 @@ import pytest
 import responses
 
 from pipeline import delivery
-from pipeline.delivery import DeliveryParseError, fetch_nse_delivery, parse_mto
+from pipeline.delivery import (
+    DeliveryParseError,
+    fetch_bse_delivery,
+    fetch_nse_delivery,
+    parse_mto,
+    parse_scbseall,
+)
 from pipeline.fetch import BhavcopyFetchError, BhavcopyNotFoundError
 
 # Trimmed from the real MTO_28102026.DAT (2019+ layout) and MTO_13062012.DAT
 # (2010-2019 layout, CRLF); the 10,MTO line is rewritten to the kept records.
 FIXTURE = Path(__file__).parent / "fixtures" / "nse_mto_20261028_sample.DAT"
 FIXTURE_2012 = Path(__file__).parent / "fixtures" / "nse_mto_20120613_sample.DAT"
+# Trimmed from the real SCBSEALL2810.zip member and the same day's BSE
+# bhavcopy to the same ten scrips, six of them in A/B/T.
+BSE_FIXTURE = Path(__file__).parent / "fixtures" / "bse_scbseall_20261028_sample.TXT"
+BSE_BHAVCOPY = Path(__file__).parent / "fixtures" / "bse_bhavcopy_20261028_sample.csv"
 
 
 def test_parse_mto_schema():
@@ -136,3 +148,125 @@ def test_fetch_nse_delivery_gives_up_after_retries(tmp_path: Path):
     with pytest.raises(BhavcopyFetchError):
         fetch_nse_delivery(date(2026, 10, 28), tmp_path, retries=2, backoff_seconds=0.0)
     assert not list(tmp_path.glob("*.DAT"))
+
+
+# --- BSE ---------------------------------------------------------------
+
+
+def test_parse_scbseall_names_rows_from_the_bhavcopy():
+    df = parse_scbseall(BSE_FIXTURE, date(2026, 10, 28), BSE_BHAVCOPY)
+    assert df.schema == delivery.DELIVERY_SCHEMA
+    # ANDHRAPET (X), ANSALAPI (Z), BHAGGAS (XT) and LIQUIDETF (F) are not in bse/.
+    assert df["symbol"].to_list() == [
+        "20MICRONS", "AMBALALSA", "BOMDYEING", "RELIANCE", "SBIN", "TCS"
+    ]
+    assert df["series"].to_list() == ["B", "T", "B", "A", "A", "A"]
+    assert set(df["date"]) == {date(2026, 10, 28)}
+
+
+def test_parse_scbseall_known_value_reliance():
+    # Scrip code 500325 is RELIANCE's FinInstrmId; the volume is its TtlTradgVol.
+    df = parse_scbseall(BSE_FIXTURE, date(2026, 10, 28), BSE_BHAVCOPY)
+    row = df.filter(pl.col("symbol") == "RELIANCE").row(0, named=True)
+    assert row["volume"] == 2297453
+    assert row["delivery_qty"] == 1271387
+    assert row["delivery_pct"] == pytest.approx(55.34)
+
+
+def test_parse_scbseall_reads_columns_by_position(tmp_path: Path):
+    # The regenerated 2024-04-25 file spells the header DAY`S, and files before
+    # it pad quantities to 9 digits instead of 16.
+    old = tmp_path / "SCBSEALL28102026.TXT"
+    old.write_text(
+        BSE_FIXTURE.read_text()
+        .replace("DAY'S", "DAY`S")
+        .replace("|0000000002297453|", "|002297453|")
+        .replace("|0000000001271387|", "|001271387|")
+    )
+    assert parse_scbseall(old, date(2026, 10, 28), BSE_BHAVCOPY).equals(
+        parse_scbseall(BSE_FIXTURE, date(2026, 10, 28), BSE_BHAVCOPY)
+    )
+
+
+def test_parse_scbseall_rejects_a_file_for_another_day():
+    with pytest.raises(DeliveryParseError, match=r"records dated \['28102026'\]"):
+        parse_scbseall(BSE_FIXTURE, date(2026, 10, 29), BSE_BHAVCOPY)
+
+
+def test_parse_scbseall_rejects_a_bhavcopy_for_another_day(tmp_path: Path):
+    bhav = tmp_path / "bhav.csv"
+    bhav.write_text(
+        BSE_BHAVCOPY.read_text().replace("2026-10-28,2026-10-28,", "2026-10-27,2026-10-27,")
+    )
+    with pytest.raises(DeliveryParseError, match=r"TradDt \['2026-10-27'\]"):
+        parse_scbseall(BSE_FIXTURE, date(2026, 10, 28), bhav)
+
+
+def test_parse_scbseall_rejects_a_short_record(tmp_path: Path):
+    short = tmp_path / "SCBSEALL28102026.TXT"
+    short.write_text(BSE_FIXTURE.read_text().rsplit("|", 1)[0] + "\r\n")
+    with pytest.raises(DeliveryParseError, match="does not have 7 fields"):
+        parse_scbseall(short, date(2026, 10, 28), BSE_BHAVCOPY)
+
+
+def test_parse_scbseall_rejects_a_file_without_the_header_line(tmp_path: Path):
+    html = tmp_path / "SCBSEALL28102026.TXT"
+    html.write_text("<!DOCTYPE html>\n<html></html>\n")
+    with pytest.raises(DeliveryParseError, match="no SCBSEALL header"):
+        parse_scbseall(html, date(2026, 10, 28), BSE_BHAVCOPY)
+
+
+def _zip_of(member: str, body: bytes) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(member, body)
+    return buf.getvalue()
+
+
+@responses.activate
+@pytest.mark.parametrize("member", ["SCBSEALL2810.TXT", "SCBSEALL2810.txt"])
+def test_fetch_bse_delivery_extracts_the_text_file(tmp_path: Path, member: str):
+    # The member has no year in its name, and is .txt in some years.
+    body = BSE_FIXTURE.read_bytes()
+    responses.add(
+        responses.GET,
+        "https://www.bseindia.com/BSEDATA/gross/2026/SCBSEALL2810.zip",
+        body=_zip_of(member, body),
+        status=200,
+        content_type="application/x-zip-compressed",
+    )
+    out = fetch_bse_delivery(date(2026, 10, 28), tmp_path)
+    assert out == tmp_path / "SCBSEALL28102026.TXT"
+    assert out.read_bytes() == body
+
+
+@responses.activate
+def test_fetch_bse_delivery_idempotent(tmp_path: Path):
+    existing = tmp_path / "SCBSEALL28102026.TXT"
+    existing.write_bytes(b"cached")
+    assert fetch_bse_delivery(date(2026, 10, 28), tmp_path) == existing
+    assert len(responses.calls) == 0
+
+
+@responses.activate
+def test_fetch_bse_delivery_404_raises_notfound(tmp_path: Path):
+    # What BSE answers before about 18:15 IST on the trade date, and on holidays.
+    responses.add(
+        responses.GET, delivery.BSE_SCBSEALL_URL.format(yyyy=2026, ddmm="2810"), status=404
+    )
+    with pytest.raises(BhavcopyNotFoundError):
+        fetch_bse_delivery(date(2026, 10, 28), tmp_path, retries=1)
+    assert not list(tmp_path.iterdir())
+
+
+@responses.activate
+def test_fetch_bse_delivery_rejects_a_payload_that_is_not_a_zip(tmp_path: Path):
+    responses.add(
+        responses.GET,
+        delivery.BSE_SCBSEALL_URL.format(yyyy=2026, ddmm="2810"),
+        body=b"<!doctype html><html></html>",
+        status=200,
+    )
+    with pytest.raises(BhavcopyFetchError, match="invalid zip payload"):
+        fetch_bse_delivery(date(2026, 10, 28), tmp_path)
+    assert not list(tmp_path.iterdir())

@@ -114,13 +114,16 @@ def fetch_bse(
     backoff_seconds: float = 2.0,
     timeout: float = 30.0,
     session: requests.Session | None = None,
+    check_calendar: bool = True,
 ) -> Path:
     """Download BSE bhavcopy for `d` into `dest_dir`. Returns path to CSV.
 
     BSE serves a plain CSV (no zip wrapping). Idempotent: returns cached path
-    if already present. Raises BhavcopyNotFoundError on 404.
+    if already present. Raises BhavcopyNotFoundError on 404. The delivery
+    backfill passes `check_calendar=False` because it picks its own days;
+    a holiday then gets BSE's HTML answer, which raises the same.
     """
-    if not holidays.is_trading_day(d, "BSE"):
+    if check_calendar and not holidays.is_trading_day(d, "BSE"):
         raise BhavcopyNotFoundError(f"{d} is not a BSE trading day")
 
     dest_dir.mkdir(parents=True, exist_ok=True)

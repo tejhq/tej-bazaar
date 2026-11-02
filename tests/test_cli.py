@@ -1,3 +1,5 @@
+import io
+import zipfile
 from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1065,6 +1067,111 @@ def test_delivery_backfill_sleeps_only_between_downloads(tmp_path: Path, cached_
     assert fetch.call_count == 3 - len(cached_days)
     assert [c.args for c in sleep.call_args_list] == [(1.0,)] * max(0, fetch.call_count - 1)
     assert len(list(out.rglob("date=*.parquet"))) == 3
+
+
+BSE_FIXTURE = Path(__file__).parent / "fixtures" / "bse_scbseall_20261028_sample.TXT"
+BSE_BHAVCOPY = Path(__file__).parent / "fixtures" / "bse_bhavcopy_20261028_sample.csv"
+
+
+def _bse_day(day: int) -> tuple[bytes, bytes]:
+    """The SCBSEALL zip and the bhavcopy fixtures, moved to `day` October 2026."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(
+            f"SCBSEALL{day}10.TXT",
+            BSE_FIXTURE.read_bytes().replace(b"28102026", f"{day}102026".encode()),
+        )
+    bhavcopy = BSE_BHAVCOPY.read_bytes().replace(b"2026-10-28", f"2026-10-{day}".encode())
+    return buf.getvalue(), bhavcopy
+
+
+@pytest.mark.parametrize("cached_bhavcopies", [[], [27, 28]])
+def test_delivery_backfill_bse_sleeps_between_all_downloads(
+    tmp_path: Path, cached_bhavcopies: list[int]
+):
+    # A BSE day downloads SCBSEALL, then the day's bhavcopy for the scrip codes,
+    # unless the prices backfill already left it in --raw-dir.
+    raw = tmp_path / "raw"
+    (raw / "bse").mkdir(parents=True)
+    for day in cached_bhavcopies:
+        cached = raw / "bse" / f"BhavCopy_BSE_CM_0_0_0_202610{day}_F_0000.csv"
+        cached.write_bytes(_bse_day(day)[1])
+
+    events = []
+
+    def scbseall(url, *args):  # .../gross/2026/SCBSEALL2710.zip
+        events.append("download")
+        return _bse_day(int(url[-8:-6]))[0]
+
+    def bhavcopy(url, *args):  # .../BhavCopy_BSE_CM_0_0_0_20261027_F_0000.CSV
+        events.append("download")
+        return _bse_day(int(url[-13:-11]))[1]
+
+    out = tmp_path / "delivery"
+    with patch("pipeline.delivery._http_get_with_retry", side_effect=scbseall) as get_scbseall, \
+         patch("pipeline.fetch._http_get_with_retry", side_effect=bhavcopy) as get_bhavcopy, \
+         patch("pipeline.cli.time.sleep", side_effect=lambda _: events.append("sleep")) as sleep:
+        result = runner.invoke(
+            app,
+            ["delivery", "backfill", "--exchange", "BSE", "--from", "2026-10-27",
+             "--to", "2026-10-28", "--raw-dir", str(raw), "--out-dir", str(out),
+             "--prices-dir", str(tmp_path / "prices")],
+        )
+    assert result.exit_code == 0, result.stdout
+    assert get_scbseall.call_count == 2
+    assert get_bhavcopy.call_count == 2 - len(cached_bhavcopies)
+    downloads = get_scbseall.call_count + get_bhavcopy.call_count
+    assert [c.args for c in sleep.call_args_list] == [(1.0,)] * (downloads - 1)
+    assert events == ["download", "sleep"] * (downloads - 1) + ["download"]
+    written = pl.read_parquet(partition_path(out, "BSE", date(2026, 10, 28)))
+    assert written["symbol"].to_list() == [
+        "20MICRONS", "AMBALALSA", "BOMDYEING", "RELIANCE", "SBIN", "TCS"
+    ]
+    assert len(list(out.rglob("date=*.parquet"))) == 2
+
+
+def test_delivery_backfill_bse_fetches_no_bhavcopy_without_scbseall(tmp_path: Path):
+    # Before about 18:15 IST the day's SCBSEALL is a 404, so its bhavcopy is not asked for.
+    with patch("pipeline.cli.fetch_bse_delivery",
+               side_effect=BhavcopyNotFoundError("bhavcopy not found (404)")), \
+         patch("pipeline.cli.fetch_bse") as fetch_bhavcopy, \
+         patch("pipeline.cli.time.sleep"):
+        result = runner.invoke(
+            app,
+            ["delivery", "backfill", "--exchange", "BSE", "--from", "2026-10-28",
+             "--to", "2026-10-28", "--raw-dir", str(tmp_path / "raw"),
+             "--out-dir", str(tmp_path / "delivery"),
+             "--prices-dir", str(tmp_path / "prices")],
+        )
+    assert result.exit_code == 0, result.stdout
+    fetch_bhavcopy.assert_not_called()
+    assert "missing BSE 2026-10-28" in result.stdout
+
+
+def test_delivery_backfill_adds_the_sessions_each_exchange_has(tmp_path: Path):
+    # The calendar has no Saturday 2026-01-31, so only a date in bse/ brings
+    # it in, and only for BSE.
+    p = tmp_path / "prices" / "bse" / "year=2026" / "bse_2026.parquet"
+    p.parent.mkdir(parents=True)
+    pl.DataFrame({"symbol": ["RELIANCE"], "date": [date(2026, 1, 31)]}).write_parquet(p)
+    missing = BhavcopyNotFoundError("not found")
+    with patch("pipeline.cli.fetch_nse_delivery", side_effect=missing) as nse, \
+         patch("pipeline.cli.fetch_bse_delivery", side_effect=missing) as bse, \
+         patch("pipeline.cli.time.sleep"):
+        result = runner.invoke(
+            app,
+            ["delivery", "backfill", "--exchange", "both", "--from", "2026-01-30",
+             "--to", "2026-02-02", "--raw-dir", str(tmp_path / "raw"),
+             "--out-dir", str(tmp_path / "delivery"),
+             "--prices-dir", str(tmp_path / "prices")],
+        )
+    assert result.exit_code == 0, result.stdout
+    assert [c.args[0] for c in nse.call_args_list] == [
+        date(2026, 1, 30), date(2026, 2, 1), date(2026, 2, 2)
+    ]
+    assert [c.args[0] for c in bse.call_args_list] == [
+        date(2026, 1, 30), date(2026, 1, 31), date(2026, 2, 1), date(2026, 2, 2)
+    ]
 
 
 @pytest.mark.parametrize(

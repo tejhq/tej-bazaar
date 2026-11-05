@@ -14,7 +14,7 @@
 ## Phase 1 - Foundation (DONE)
 
 - [x] README + license + scaffold
-- [x] NSE holiday calendar (`exchange_calendars` wrapper, XBOM)
+- [x] NSE holiday calendar (dated list in `pipeline/nse_calendar.py`)
 - [x] NSE bhavcopy fetcher (zip to CSV, retries, idempotent)
 - [x] CSV to Polars DataFrame parser, normalized schema (SEBI CMTS)
 - [x] Transform: filter series, validate prices, dedupe, sort

@@ -373,7 +373,7 @@ Adjusted closes for the top 50 NSE names (by mean daily turnover) over
   never pulls pandas; install it via the optional `reconcile` extra:
   `pip install -e ".[reconcile]"`.
 
-The pipeline skips market holidays automatically using `exchange_calendars` (NSE/BSE share trading days).
+The pipeline skips market holidays using the dated list in `pipeline/nse_calendar.py` (NSE and BSE share trading days), which also holds special sessions such as budget days and Muhurat trading. 2010 to 2026 were checked against the files NSE published for every date. Add each new year from NSE's holiday circular; until then every weekday counts as a session, a holiday just 404s, and `check-sessions` warns instead of failing.
 
 ---
 

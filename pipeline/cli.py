@@ -433,6 +433,7 @@ def check_sessions(
     table.add_column("Bhavcopy")
     late: list[date] = []
     waiting: list[tuple[date, date]] = []
+    unlisted: list[date] = []
     for d in sessions:
         if d in have:
             table.add_row(d.isoformat(), "[green]fetched[/green]")
@@ -443,11 +444,17 @@ def check_sessions(
         fails_on = d
         if grace:
             # The grace-th session after d; a week per session is ample.
-            fails_on = _nse_days(d + timedelta(days=1), d + timedelta(days=7 * grace))[grace - 1]
-        if at >= datetime.combine(fails_on, datetime.min.time()).replace(hour=due_hour):
+            fails_on = holidays.trading_days_between(d + timedelta(days=1), d + timedelta(days=7 * grace), "NSE")[grace - 1]
+        due = datetime.combine(d, datetime.min.time()).replace(hour=due_hour)
+        if not holidays.is_listed(d) and at >= due:
+            table.add_row(d.isoformat(), "[yellow]missing, no holiday list for this year[/yellow]")
+            unlisted.append(d)
+        elif not holidays.is_listed(d):
+            table.add_row(d.isoformat(), "[yellow]not published yet[/yellow]")
+        elif at >= datetime.combine(fails_on, datetime.min.time()).replace(hour=due_hour):
             table.add_row(d.isoformat(), "[red]missing, past due[/red]")
             late.append(d)
-        elif at >= datetime.combine(d, datetime.min.time()).replace(hour=due_hour):
+        elif at >= due:
             table.add_row(d.isoformat(), f"[yellow]missing, fails from {fails_on}[/yellow]")
             waiting.append((d, fails_on))
         else:
@@ -456,6 +463,12 @@ def check_sessions(
         table.add_row("none", "no trading day in range")
     console.print(table)
 
+    if (at.year, at.month) >= (holidays.LAST_LISTED_YEAR, 12):
+        print(f"::warning::pipeline/nse_calendar.py lists holidays to {holidays.LAST_LISTED_YEAR}. "
+              "Add the next year from NSE's holiday circular.")
+    for d in unlisted:
+        print(f"::warning::{d} missing under {prices_dir}, and {d.year} has no holiday list "
+              "in pipeline/nse_calendar.py, so this cannot fail the run. Add it.")
     for d, fails_on in waiting:
         print(f"::warning::{d} missing under {prices_dir}; "
               f"fails if still missing at {due_hour}:00 IST on {fails_on}")
@@ -635,7 +648,7 @@ def _nse_file_backfill(
     has. A 404 counts as skipped, and no per-day failure stops the loop.
     """
     priced = {d for d in _dates_on_disk(prices_dir / "nse") if start <= d <= end}
-    sessions = sorted(set(_nse_days(start, end)) | priced)
+    sessions = sorted(set(holidays.trading_days_between(start, end, "NSE")) | priced)
     console.print(
         f"[bold]{len(sessions)}[/bold] trading days in [cyan]{start}[/cyan] → [cyan]{end}[/cyan]"
     )
@@ -2017,22 +2030,6 @@ def _dates_on_disk(root: Path) -> set[date]:
     for p in root.rglob("year=*/*.parquet"):
         have.update(pl.read_parquet(p, columns=["date"])["date"].to_list())
     return have
-
-
-def _nse_days(start: date, end: date) -> list[date]:
-    """NSE sessions in [start, end], and every weekday past the calendar's last session.
-
-    exchange_calendars ships XBOM a year at a time and raises past its last
-    session (2026-12-31 in 4.13.2). A weekday that was a holiday just 404s.
-    """
-    last = holidays._calendar("NSE").last_session.date()
-    days = holidays.trading_days_between(start, min(end, last), "NSE") if start <= last else []
-    d = max(start, last + timedelta(days=1))
-    while d <= end:
-        if d.weekday() < 5:
-            days.append(d)
-        d += timedelta(days=1)
-    return days
 
 
 def _year_from_actions_filename(p: Path) -> int | None:

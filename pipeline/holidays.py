@@ -1,53 +1,47 @@
-"""Trading-day calendar for Indian exchanges.
+"""Trading-day calendar for Indian exchanges, from the dated list in `nse_calendar`.
 
-Wraps `exchange_calendars` so the rest of the pipeline can ask simple questions:
-is `date` a trading day on `exchange`, and what is the previous trading day.
+NSE and BSE share trading days. A session is a weekday not listed as a holiday,
+or a listed special session (budget Saturdays, Muhurat trading). A year with no
+list counts every weekday as a session, so a run keeps fetching and a holiday
+just 404s. Add each new year from NSE's circular.
 """
 
 from __future__ import annotations
 
-from datetime import date
-from functools import lru_cache
+from datetime import date, timedelta
 from typing import Literal
 
-import exchange_calendars as ecals
-import pandas as pd
+from pipeline.nse_calendar import HOLIDAYS, SPECIAL_SESSIONS
 
 Exchange = Literal["NSE", "BSE"]
 
-_CALENDAR_CODE: dict[Exchange, str] = {
-    "NSE": "XBOM",  # exchange_calendars groups NSE+BSE under XBOM (same trading days)
-    "BSE": "XBOM",
-}
+LAST_LISTED_YEAR = max(d.year for d in HOLIDAYS)
 
 
-@lru_cache(maxsize=4)
-def _calendar(exchange: Exchange):
-    code = _CALENDAR_CODE[exchange]
-    return ecals.get_calendar(code)
+def is_listed(d: date) -> bool:
+    """Whether `d`'s year has a holiday list, so a missing session means something."""
+    return d.year <= LAST_LISTED_YEAR
 
 
 def is_trading_day(d: date, exchange: Exchange = "NSE") -> bool:
-    cal = _calendar(exchange)
-    return cal.is_session(pd.Timestamp(d))
+    return d in SPECIAL_SESSIONS or (d.weekday() < 5 and d not in HOLIDAYS)
 
 
 def previous_trading_day(d: date, exchange: Exchange = "NSE") -> date:
-    cal = _calendar(exchange)
-    ts = pd.Timestamp(d)
-    prev = cal.previous_session(ts) if cal.is_session(ts) else cal.date_to_session(ts, direction="previous")
-    return prev.date()
+    d -= timedelta(days=1)
+    while not is_trading_day(d, exchange):
+        d -= timedelta(days=1)
+    return d
 
 
 def next_trading_day(d: date, exchange: Exchange = "NSE") -> date:
-    cal = _calendar(exchange)
-    ts = pd.Timestamp(d)
-    nxt = cal.next_session(ts) if cal.is_session(ts) else cal.date_to_session(ts, direction="next")
-    return nxt.date()
+    d += timedelta(days=1)
+    while not is_trading_day(d, exchange):
+        d += timedelta(days=1)
+    return d
 
 
 def trading_days_between(start: date, end: date, exchange: Exchange = "NSE") -> list[date]:
     """Inclusive range of trading sessions in [start, end]."""
-    cal = _calendar(exchange)
-    sessions = cal.sessions_in_range(pd.Timestamp(start), pd.Timestamp(end))
-    return [s.date() for s in sessions]
+    days = (start + timedelta(days=i) for i in range((end - start).days + 1))
+    return [d for d in days if is_trading_day(d, exchange)]

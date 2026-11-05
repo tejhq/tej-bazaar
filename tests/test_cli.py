@@ -910,8 +910,8 @@ def test_check_sessions_grace_counts_trading_days(tmp_path: Path):
     assert runner.invoke(app, [*args, "--now", "2026-10-07T20:00"]).exit_code == 1
 
 
-def test_check_sessions_grace_runs_past_the_calendar(tmp_path: Path):
-    # XBOM ends on 2026-12-31, so the third trading day after the 29th is
+def test_check_sessions_grace_runs_past_the_holiday_list(tmp_path: Path):
+    # The list ends with 2026, so the third trading day after the 29th is
     # counted on weekdays: Friday 1 January 2027.
     args = ["check-sessions", "--from", "2026-12-29", "--to", "2026-12-29",
             "--prices-dir", str(tmp_path), "--grace", "3"]
@@ -919,6 +919,21 @@ def test_check_sessions_grace_runs_past_the_calendar(tmp_path: Path):
     assert warned.exit_code == 0, warned.stdout
     assert "20:00 IST on 2027-01-01" in warned.stdout
     assert runner.invoke(app, [*args, "--now", "2027-01-01T20:00"]).exit_code == 1
+
+
+def test_check_sessions_warns_only_for_a_year_without_a_list(tmp_path: Path):
+    # A missing day in 2027 may be a holiday nobody has listed yet.
+    args = ["check-sessions", "--from", "2027-01-04", "--to", "2027-01-04", "--prices-dir", str(tmp_path)]
+    result = runner.invoke(app, [*args, "--now", "2027-01-20T20:00"])
+    assert result.exit_code == 0, result.stdout
+    assert "2027-01-04 missing" in result.stdout
+    assert "no holiday list" in result.stdout
+
+
+def test_check_sessions_reminds_in_december_to_add_the_next_year(tmp_path: Path):
+    args = ["check-sessions", "--from", "2026-11-28", "--to", "2026-11-29", "--prices-dir", str(tmp_path)]
+    assert "Add the next year" not in runner.invoke(app, [*args, "--now", "2026-11-30T20:00"]).stdout
+    assert "Add the next year" in runner.invoke(app, [*args, "--now", "2026-12-01T20:00"]).stdout
 
 
 def test_check_sessions_counts_days_inside_a_year_rollup(tmp_path: Path):
@@ -1012,8 +1027,8 @@ def test_delivery_backfill_adds_the_sessions_nse_has(tmp_path: Path):
     assert days == [date(2024, 1, 19), date(2024, 1, 20), date(2024, 1, 23)]
 
 
-def test_delivery_backfill_runs_past_the_calendar(tmp_path: Path):
-    # XBOM ends on 2026-12-31; after it every weekday is tried.
+def test_delivery_backfill_runs_past_the_holiday_list(tmp_path: Path):
+    # The list ends with 2026; after it every weekday is tried.
     days = _fetched_days(tmp_path, "--from", "2026-12-31", "--to", "2027-01-05")
     assert days == [date(2026, 12, 31), date(2027, 1, 1), date(2027, 1, 4), date(2027, 1, 5)]
 

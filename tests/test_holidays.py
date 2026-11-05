@@ -46,3 +46,40 @@ def test_bse_same_calendar_as_nse():
     # NSE and BSE share trading days
     d = date(2025, 1, 6)
     assert holidays.is_trading_day(d, "NSE") == holidays.is_trading_day(d, "BSE")
+
+
+@pytest.mark.parametrize(
+    "d",
+    [
+        date(2010, 2, 6),    # Saturday
+        date(2010, 5, 16),   # Sunday, gold ETFs only
+        date(2013, 11, 14),  # the XBOM calendar had this closed
+        date(2024, 1, 20),   # special live session, Saturday
+        date(2024, 11, 1),   # Muhurat, Friday
+        date(2025, 2, 1),    # budget, Saturday
+        date(2025, 10, 21),  # Muhurat, Tuesday
+        date(2026, 2, 1),    # budget, Sunday
+    ],
+)
+def test_special_sessions_are_trading_days(d):
+    assert holidays.is_trading_day(d, "NSE")
+    assert d in holidays.trading_days_between(d, d, "NSE")
+
+
+def test_closed_day_the_old_calendar_had_open():
+    assert not holidays.is_trading_day(date(2013, 11, 15), "NSE")
+
+
+def test_year_without_a_list_counts_weekdays():
+    assert holidays.is_listed(date(2026, 12, 31))
+    assert not holidays.is_listed(date(2027, 1, 1))
+    assert holidays.is_trading_day(date(2027, 1, 1), "NSE")  # Friday
+    assert not holidays.is_trading_day(date(2027, 1, 2), "NSE")  # Saturday
+    assert holidays.next_trading_day(date(2026, 12, 31), "NSE") == date(2027, 1, 1)
+    assert holidays.trading_days_between(date(2026, 12, 31), date(2027, 1, 4), "NSE") == [
+        date(2026, 12, 31), date(2027, 1, 1), date(2027, 1, 4),
+    ]
+
+
+def test_weekday_after_special_sunday_previous_is_the_special_session():
+    assert holidays.previous_trading_day(date(2026, 2, 2), "NSE") == date(2026, 2, 1)

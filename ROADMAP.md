@@ -115,10 +115,10 @@ adjusted-close layer alongside raw.
 - [x] `tej-bazaar universe build`: monthly top-500 by trailing 63-trading-day turnover per exchange, point-in-time symbols/ISINs, delisted names kept. `universe/<ex>_liquid.parquet`, wired into the derived cron job. Served by tej-api `/v1/universe/liquid{100,250,500}?as_of=`.
 - [ ] Real index constituents (NIFTY50/500, SENSEX) from NSE index-change history
 
-## Phase 5.6 - Delivery positions (PARTIAL)
+## Phase 5.6 - Delivery positions (DONE)
 
 - [x] NSE delivery quantity and % from NSE's MTO file, 2010 onwards: `tej-bazaar delivery backfill`, `delivery/nse/` year rollups joined to `nse/` on `(date, symbol, series)`, and a `delivery` cron job that warns on a late file and fails once a session is three trading days late (`check-sessions --grace 3`)
-- [ ] BSE delivery from the SCBSEALL file, 2024-07-08 onwards
+- [x] BSE delivery from BSE's SCBSEALL file, 2024-07-08 onwards like `bse/`: `delivery backfill --exchange BSE`, `delivery/bse/` year rollups whose scrip codes are named from the same day's bhavcopy, and the same cron job (`check-sessions --due-hour 21 --grace 3`)
 
 ## Phase 6 - SDKs & API handoff (PARTIAL)
 

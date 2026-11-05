@@ -46,9 +46,9 @@ concurrency:
 #             "the job ran": see the session check in the prices job.
 #   derived - corp actions, symbol history, adjusted prices, metrics.
 #             Rebuilt from full history, published from its own dir.
-#   delivery - NSE delivery positions over the same sweep, into
-#             delivery/nse/. A late file is a warning; one still missing
-#             three trading days on fails the run.
+#   delivery - NSE and BSE delivery positions over the same sweep, into
+#             delivery/nse/ and delivery/bse/. A late file is a warning; one
+#             still missing three trading days on fails the run.
 #   fo      - NSE F&O bhavcopy over the same sweep, into fo/nse/ in the
 #             private bucket named by the FO_BUCKET repo variable. Not on
 #             HF or the public bucket: F&O is a paid API dataset. Skipped
@@ -458,11 +458,12 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   delivery:
-    # Delivery quantity and % per security from NSE's MTO file, published as
-    # delivery/nse/ and joined to nse/ on (date, symbol, series). Its own job
-    # so a late or broken file never holds up prices or derived, and it still
-    # runs when prices failed. MTO lands ~16:30 to 17:00 IST; a missing one
-    # is skipped, so the next run's sweep fetches it.
+    # Delivery quantity and % per security from NSE's MTO file and BSE's
+    # SCBSEALL file, published as delivery/nse/ and delivery/bse/ and joined
+    # to nse/ and bse/ on (date, symbol, series). Its own job so a late or
+    # broken file never holds up prices or derived, and it still runs when
+    # prices failed. MTO lands ~16:30 to 17:00 IST and SCBSEALL ~18:15 to
+    # 20:30 IST; a missing one is skipped, so the next run's sweep fetches it.
     needs: prices
     if: ${{ !cancelled() && needs.prices.outputs.from != '' }}
     runs-on: ubuntu-latest
@@ -491,17 +492,20 @@ jobs:
           TO="${{ needs.prices.outputs.to }}"
           for YEAR in $(seq "${FROM%%-*}" "${TO%%-*}"); do
             tej-bazaar pull-r2 --prefix "delivery/nse/year=$YEAR/" \
+              --prefix "delivery/bse/year=$YEAR/" \
               --data-dir data/out --bucket tej-bazaar
           done
 
-      - name: Fetch NSE delivery
+      - name: Fetch NSE and BSE delivery
         # Holidays and files not published yet are skipped, never fatal.
-        # One second between downloads keeps the sweep polite to NSE.
+        # One second between downloads keeps the sweep polite. A BSE day also
+        # downloads that day's bhavcopy, whose scrip codes name the rows.
         id: fetched
         run: |
           tej-bazaar delivery backfill \
             --from "${{ needs.prices.outputs.from }}" \
             --to "${{ needs.prices.outputs.to }}" \
+            --exchange both \
             --out-dir data/out/delivery
           YEARS=$(find data/out/delivery -name 'date=*.parquet' \
             | sed -n 's|.*/year=\([0-9]\{4\}\)/.*|\1|p' | sort -u | tr '\n' ' ')
@@ -514,15 +518,17 @@ jobs:
         run: |
           tej-bazaar publish-r2 --data-dir data/out --bucket tej-bazaar
           for YEAR in ${{ steps.fetched.outputs.years }}; do
-            tej-bazaar compact --year "$YEAR" --exchange NSE \
+            tej-bazaar compact --year "$YEAR" --exchange both \
               --data-dir data/out/delivery --prefix delivery \
               --from-r2 --refresh --bucket tej-bazaar
           done
           tej-bazaar publish-r2 --data-dir data/out --bucket tej-bazaar
           for YEAR in ${{ steps.fetched.outputs.years }}; do
-            tej-bazaar r2-prune --prefix "delivery/nse/year=$YEAR/month=" \
-              --bucket tej-bazaar --yes
-            rm -rf data/out/delivery/nse/year="$YEAR"/month=*
+            for ex in nse bse; do
+              tej-bazaar r2-prune --prefix "delivery/$ex/year=$YEAR/month=" \
+                --bucket tej-bazaar --yes
+              rm -rf data/out/delivery/"$ex"/year="$YEAR"/month=*
+            done
           done
 
       - name: Publish delivery to HF
@@ -535,18 +541,29 @@ jobs:
             --repo tejhq/indian-markets \
             --data-dir data/out \
             --delete-pattern "delivery/*/year=*/month=*" \
-            -m "daily: NSE delivery to ${{ needs.prices.outputs.to }}"
+            -m "daily: NSE+BSE delivery to ${{ needs.prices.outputs.to }}"
 
       - name: Delivery may lag, but not by three trading days
-        # A session missing past 18:00 IST is a ::warning:: only. Still
-        # missing at 18:00 IST three trading days on, it fails the run.
+        # A session missing past its due hour is a ::warning:: only: 18:00 IST
+        # for NSE, whose file lands by about 17:00, and 21:00 IST for BSE,
+        # whose file lands by about 20:30. Still missing at that hour three
+        # trading days on, it fails the run. Each exchange is checked on its
+        # own, and both are checked before the step fails.
         run: |
+          rc=0
           tej-bazaar check-sessions \
             --from "${{ needs.prices.outputs.from }}" \
             --to "${{ needs.prices.outputs.to }}" \
-            --prices-dir data/out/delivery \
+            --prices-dir data/out/delivery/nse \
             --due-hour 18 \
-            --grace 3
+            --grace 3 || rc=1
+          tej-bazaar check-sessions \
+            --from "${{ needs.prices.outputs.from }}" \
+            --to "${{ needs.prices.outputs.to }}" \
+            --prices-dir data/out/delivery/bse \
+            --due-hour 21 \
+            --grace 3 || rc=1
+          exit "$rc"
 
   fo:
     # NSE F&O end-of-day bhavcopy, one row per contract per day, published to

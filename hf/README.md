@@ -39,11 +39,13 @@ configs:
     data_files: "universe/*_liquid.parquet"
   - config_name: delivery_nse
     data_files: "delivery/nse/year=*/nse_*.parquet"
+  - config_name: delivery_bse
+    data_files: "delivery/bse/year=*/bse_*.parquet"
 ---
 
 # tejhq/indian-markets
 
-End-of-day data for every **NSE** and **BSE** listed equity, built straight from the exchanges' official bhavcopy. Seven parquet trees: raw prices, corporate actions, back-adjusted prices, symbol history, derived metrics, a survivorship-bias-free liquidity universe, and NSE delivery quantity and delivery %. Refreshed every trading day by an open pipeline.
+End-of-day data for every **NSE** and **BSE** listed equity, built straight from the exchanges' official bhavcopy. Seven parquet trees: raw prices, corporate actions, back-adjusted prices, symbol history, derived metrics, a survivorship-bias-free liquidity universe, and NSE and BSE delivery quantity and delivery %. Refreshed every trading day by an open pipeline.
 
 No broker, no auth, no scraping. The same data is served at [api.tejhq.dev](https://api.tejhq.dev) and mirrored on Cloudflare R2.
 
@@ -154,18 +156,21 @@ One file per exchange: `universe/<ex>_liquid.parquet`. On the first trading day 
 
 `liquid100`, `liquid250` and `liquid500` are `rank <= N` filters over the same rows.
 
-### 7. `delivery/nse/`: delivery quantity and delivery %
+### 7. `delivery/nse/`, `delivery/bse/`: delivery quantity and delivery %
 
-One rollup per year, `delivery/nse/year=YYYY/nse_YYYY.parquet`, from NSE's security-wise delivery position file, 2010 onwards. No ISIN in the source; join to `nse/` on `(date, symbol, series)`. `EQ` rows only: the source has no `BE`/`BZ` rows, which settle entirely by delivery.
+One rollup per exchange per year, `delivery/<ex>/year=YYYY/<ex>_YYYY.parquet`. No ISIN in either source; join to `nse/` or `bse/` on `(date, symbol, series)`.
+
+- `delivery/nse/`: NSE's security-wise delivery position file, 2010 onwards. `EQ` rows only: the source has no `BE`/`BZ` rows, which settle entirely by delivery.
+- `delivery/bse/`: BSE's gross deliverables file, 2024-07-08 onwards like `bse/`, `A`/`B`/`T` rows.
 
 | Field | Type | Notes |
 |-------|------|-------|
 | `date` | date | Trading date |
 | `symbol` | string | Ticker |
-| `series` | string | `EQ` |
-| `volume` | int64 | Quantity traded; equals `volume` in `nse/` |
+| `series` | string | NSE: `EQ`, BSE: `A`/`B`/`T` |
+| `volume` | int64 | Quantity traded; equals `volume` in `nse/` or `bse/` |
 | `delivery_qty` | int64 | Deliverable quantity |
-| `delivery_pct` | float64 | `delivery_qty / volume` in percent, as NSE publishes it |
+| `delivery_pct` | float64 | `delivery_qty / volume` in percent, as the exchange publishes it |
 
 ## Quickstart
 

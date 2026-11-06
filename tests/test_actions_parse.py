@@ -450,6 +450,13 @@ def test_dividend_cash_shapes(text, cash):
             50.0,
         ),
         ("Dividend Re 0.3 (Special Dividend Re 0.1 And Final Dividend Re 0.2)", 0.3),
+        # A rate is not cash, and neither is a bare year closing a clause.
+        ("Dividend 50 Per Cent", None),
+        ("Interim Dividend 25 percent On Equity Shares", None),
+        ("Final Dividend 40 Per-Cent", None),
+        ("Interim Dividend 2026", None),
+        ("Final Dividend 2025 / Special Dividend Rs 5 Per Share", 5.0),
+        ("Interim Dividend Rs 2026", 2026.0),
     ],
 )
 def test_dividend_cash_guards(text, cash):

@@ -33,10 +33,12 @@ _RE_MONEY = re.compile(r"\bR(?:\s?e)?s?\.?\s*:?\s*-?\s*(?:per\s+)?(\d+(?:\.\d+)?
 # An amount with no marker, right after a payout word: "Dividend - 1.40 Per Share", "Special
 # Dividend 243 Per Share", "Proceeds - 1.98 Per Unit", "Dividend 1 Rs Per Share", "Dividend - S 5/-".
 # It has to be followed by "/-", "per", "Rs", a breakdown or the end of a clause, so years
-# ("Fy 2018-19") and percentages ("Dividend @ 12%") stay out.
+# ("Fy 2018-19") and percentages ("Dividend @ 12%", "Dividend 50 Per Cent") stay out. A bare year
+# closing a clause ("Interim Dividend 2026") is not an amount either; "Rs 2026" still is.
 _RE_BARE_MONEY = re.compile(
     r"\b(?:dividend|distribution|special|interest|proceeds|refund)\s*[:\-]?\s*(?:s\s+)?"
-    r"(\d+(?:\.\d+)?)(?=\s*(?:/-)?\s*(?:per\b|pr\b|rs\b|consist|compris|$|[+&]|/(?!\s*\d)))",
+    r"(?!(?:19|20)\d\d\s*(?:$|[+&]|/(?!-)))"
+    r"(\d+(?:\.\d+)?)(?=\s*(?:/-)?\s*(?:per\b(?!\s*-?\s*cent)|pr\b|rs\b|consist|compris|$|[+&]|/(?!\s*\d)))",
     re.I,
 )
 

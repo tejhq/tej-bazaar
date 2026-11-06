@@ -26,9 +26,12 @@ _NSE_NON_EQUITY_SERIES: frozenset[str] = frozenset({
 })
 
 # Money amount: matches "Rs 8", "Re 0.50", "Rs.10", "Rs. - 0.0100", "Rs:- 8/-", "R E 1" and the
-# swapped "Rs Per 0.09". The marker has to start a word: "r 2013" in "Year 2013" and "re 9" in
-# "Share 9purpose" are not money.
-_RE_MONEY = re.compile(r"\bR(?:\s?e)?s?\.?\s*:?\s*-?\s*(?:per\s+)?(\d+(?:\.\d+)?)", re.I)
+# swapped "Rs Per 0.09". The marker has to start a word, or be a capital Rs or Re glued to the word
+# before ("DividendRs.5", "OfRs.5"): "r 2013" in "Year 2013" and "re 9" in "Share 9purpose" are not
+# money.
+_RE_MONEY = re.compile(
+    r"(?:\bR(?:\s?e)?s?|(?<=[a-z])(?-i:R)[es])\.?\s*:?\s*-?\s*(?:per\s+)?(\d+(?:\.\d+)?)", re.I
+)
 
 # An amount with no marker, right after a payout word: "Dividend - 1.40 Per Share", "Special
 # Dividend 243 Per Share", "Proceeds - 1.98 Per Unit", "Dividend 1 Rs Per Share", "Dividend - S 5/-".

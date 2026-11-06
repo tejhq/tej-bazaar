@@ -571,3 +571,22 @@ def test_dividends_mentioning_a_face_value_are_still_dividends():
     assert _classify(text) == "dividend"
     _, _, cash, _, _ = _extract_details("dividend", text)
     assert cash == 36.50
+
+
+@pytest.mark.parametrize(
+    ("text", "cash"),
+    [
+        ("DividendRs.5/- Per Share", 5.0),
+        ("Dividend OfRs.5 Per Share", 5.0),
+        ("Final DividendRs 2.50", 2.5),
+        ("Interim DividendRe.1/- Per Share", 1.0),
+        ("Dividend Rs 2 Per ShareRs 3", 5.0),
+        # A lowercase r or re closing a word is still not a marker.
+        ("Interim Dividend Of Re.1/- Per Share For The Financial Year 2013-2014", 1.0),
+        ("Interim Dividend Rs 6/- Per Share 9purpose Revised)", 6.0),
+    ],
+)
+def test_dividend_cash_marker_glued_to_the_word_before(text, cash):
+    from pipeline.actions.parse import dividend_cash
+
+    assert dividend_cash(text) == cash

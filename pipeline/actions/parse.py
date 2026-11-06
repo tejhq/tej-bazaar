@@ -9,6 +9,7 @@ string is preserved for downstream review.
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import date, datetime
 from typing import Any
@@ -24,8 +25,23 @@ _NSE_NON_EQUITY_SERIES: frozenset[str] = frozenset({
     "SG",   # State Gov Securities
 })
 
-# Money amount: matches "Rs 8", "Re 0.50", "Rs.10", "Rs. - 0.0100"
-_RE_MONEY = re.compile(r"(?:Re?s?\.?)\s*-?\s*(\d+(?:\.\d+)?)", re.I)
+# Money amount: matches "Rs 8", "Re 0.50", "Rs.10", "Rs. - 0.0100", "Rs:- 8/-", "R E 1" and the
+# swapped "Rs Per 0.09". The marker has to start a word: "r 2013" in "Year 2013" and "re 9" in
+# "Share 9purpose" are not money.
+_RE_MONEY = re.compile(r"\bR(?:\s?e)?s?\.?\s*:?\s*-?\s*(?:per\s+)?(\d+(?:\.\d+)?)", re.I)
+
+# An amount with no marker, right after a payout word: "Dividend - 1.40 Per Share", "Special
+# Dividend 243 Per Share", "Proceeds - 1.98 Per Unit", "Dividend 1 Rs Per Share", "Dividend - S 5/-".
+# It has to be followed by "/-", "per", "Rs", a breakdown or the end of a clause, so years
+# ("Fy 2018-19") and percentages ("Dividend @ 12%") stay out.
+_RE_BARE_MONEY = re.compile(
+    r"\b(?:dividend|distribution|special|interest|proceeds|refund)\s*[:\-]?\s*(?:s\s+)?"
+    r"(\d+(?:\.\d+)?)(?=\s*(?:/-)?\s*(?:per\b|pr\b|rs\b|consist|compris|$|[+&]|/(?!\s*\d)))",
+    re.I,
+)
+
+# A mistyped decimal point: "Re 0..30", "Rs 62..50/-", "Rs 0 .70".
+_RE_BAD_DECIMAL = re.compile(r"(\d)\s*\.\.+\s*(\d)|(\d)\s+\.(\d)")
 
 # Bonus ratio: "Bonus 3:1", "Bonus issue 1:50", "Bonus - 3:1", "Bonus- 1:2",
 # "Bonus Shares In The Ratio Of 1:1". Only these words may come between, so another action's ratio
@@ -149,10 +165,22 @@ def _extract_details(
 
 # "Per Equity Share Of Rs.10/- Each", "face value Rs 2": a par value, not cash.
 _RE_PAR_NOTE = re.compile(
-    r"(?:(?:share|unit)s?\s+of\s+|face\s+value\s+(?:of\s+)?)(?:Re?s?\.?)\s*-?\s*\d+(?:\.\d+)?\s*(?:/-)?\s*(?:each)?",
+    r"(?:(?:share|unit)s?\s+of\s+|face\s+value\s+(?:of\s+)?)(?:R(?:\s?e)?s?\.?)\s*:?\s*-?\s*\d+(?:\.\d+)?\s*(?:/-)?\s*(?:each)?",
     re.I,
 )
-_RE_TOTAL_THEN_BREAKDOWN = re.compile(r"compris|consist|includ|break", re.I)
+_RE_TOTAL_THEN_BREAKDOWN = re.compile(r"compris|consis|includ|break", re.I)
+
+
+def _amount(digits: str) -> float:
+    # A leading zero before two or more digits is a lost decimal point: "Rs.0125" is 0.125, the same
+    # dividend the company paid in the five years before. Two digits ("Rs 09") are a padded integer.
+    if re.fullmatch(r"0\d{2,}", digits):
+        return float("0." + digits[1:])
+    return float(digits)
+
+
+def _bracket_depth(text: str, pos: int) -> int:
+    return text.count("(", 0, pos) - text.count(")", 0, pos)
 
 
 def dividend_cash(text: str) -> float | None:
@@ -162,18 +190,30 @@ def dividend_cash(text: str) -> float | None:
     the same ex date ("Final Dividend Rs 4 And Special Dividend Rs 10",
     "Interim Dividend Rs 25 / Dividend Rs 65", InvIT interest plus return
     of capital plus dividend): the price drops by the total, so they are
-    summed. The one exception is a distribution that states its total and
-    then breaks it down ("Distribution Rs 2.23 Per Unit Comprises Of ..."),
-    where the first amount already is the total. A par value note ("Per
-    Share Of Rs 10 Each") is stripped before extraction.
+    summed. The exception is a line that states its total and then breaks
+    it down ("Distribution Rs 2.23 Per Unit Comprises Of ...", "Dividend
+    Rs 8.50 (Including Special Dividend Of Rs 2)", or a bracket whose
+    amounts add up to the first), where the first amount already is the
+    total. A par value note ("Per Share Of Rs 10 Each") is stripped before
+    extraction.
     """
-    cleaned = _RE_PAR_NOTE.sub(" ", text or "")
-    amounts = [float(x) for x in _RE_MONEY.findall(cleaned)]
+    cleaned = _RE_BAD_DECIMAL.sub(lambda m: f"{m[1] or m[3]}.{m[2] or m[4]}", text or "")
+    cleaned = _RE_PAR_NOTE.sub(" ", cleaned)
+    found = sorted(
+        [(m.start(), m[1]) for m in _RE_MONEY.finditer(cleaned)]
+        + [(m.start(1), m[1]) for m in _RE_BARE_MONEY.finditer(cleaned)]
+    )
+    amounts = [_amount(digits) for _, digits in found]
     if not amounts:
         return None
     if len(amounts) == 1:
         return amounts[0]
-    if "distribution" in cleaned.lower() and _RE_TOTAL_THEN_BREAKDOWN.search(cleaned):
+    if _RE_TOTAL_THEN_BREAKDOWN.search(cleaned):
+        return amounts[0]
+    depth = _bracket_depth(cleaned, found[0][0])
+    if all(_bracket_depth(cleaned, pos) > depth for pos, _ in found[1:]) and math.isclose(
+        sum(amounts[1:]), amounts[0]
+    ):
         return amounts[0]
     return round(sum(amounts), 4)
 

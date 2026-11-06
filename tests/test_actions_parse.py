@@ -361,6 +361,103 @@ def test_dividend_cash_ignores_par_value_note():
     assert dividend_cash("Annual General Meeting") is None
 
 
+# Cash the feed writes in ways the amount pattern used to misread, all from real announcements.
+CASH_SHAPES = [
+    # A word ending in "r" or "re" is not a currency marker.
+    ("Interim Dividend Of Re.1/- Per Share (10)% For The Financial Year 2013-2014", 1.0),
+    ("Interim Dividend Rs 6/- Per Share 9purpose Revised)", 6.0),
+    # ...but "Rs Per 0.09" is still an amount, and a stated total still wins.
+    (
+        "Dividend - Rs Per 0.09 Unit/Interest Payment - Rs 3.88 Per Unit/Return On Capital - Rs 2 Per Unit/Interest On Fixed Deposit - Rs 0.03 Per Unit",
+        6.0,
+    ),
+    ("Interim Dividend - Rs Per 0.50 Share", 0.5),
+    (
+        "Distribution - Rs 3.649 Per Unit Consists Of Interest- Rs 1.8475 Per Unit/Dividend - Re 0.9003 Per Unit/ Dividend For Apr 01 To Apr 15, 2025 - Re 0.6669 /Return Of Capital Re 0.2343 Per Unit",
+        3.649,
+    ),
+    # An amount with no marker, or a garbled one.
+    ("Interim Dividend 3 Per Share", 3.0),
+    ("Aannual General Meeting/Dividend - 1.40 Per Share", 1.4),
+    ("Distribution - 4.8376 Per Unit", 4.8376),
+    ("Annual General Meeting/Dividend Rs:- 5.50 Per Share", 5.5),
+    ("Annual General Meeting/Dividend - R E 1 Per Share", 1.0),
+    ("Annual General Meeting /Dividend - 1 Rs Per Share", 1.0),
+    ("Interim Dividend - S 5/- Per Share (Purpose Revised)", 5.0),
+    ("Annual General Meeting/Dividend 12.50/-+Special Dividend 0.50/- Per Share", 13.0),
+    (
+        "Distribution - 3.04316 Consisting Of Interest Rs 3.04013 Per Unit / Other Income - Rs 0.00303",
+        3.04316,
+    ),
+    # A second payout written without a marker.
+    ("Dividend - Rs 106 Per Share Special Dividend 243 Per Share", 349.0),
+    ("Annual General Meeting / Dividend - Final Re 1 + Special 0.50 Per Share", 1.5),
+    (
+        "Dividend - Rs 2.54 Per Unit/Interest Amount - Rs 1.14 Per Unit/ Proceeds - 1.98 Per Unit",
+        5.66,
+    ),
+    (
+        "Dividend - Rs 0.06 Per Unit/Interest Amount - Rs 2.45 Per Unit/Repayment Of Spv Debt - Rs 2.56 Per Unit/Fd And Income Tax Refund- 0.03",
+        5.1,
+    ),
+    # A mistyped decimal point.
+    ("Annual General Meeting/Dividend - Re 0..30 Per Share", 0.3),
+    ("Annual General Meeting/Dividend - Rs 62..50/- Per Share", 62.5),
+    ("Dividend - Rs 0 .70 Per Share", 0.7),
+    ("Annual General Meeting/Dividend - Rs.0125 Per Share", 0.125),
+    ("Interim Dividend - Rs 09 Per Share / Special Dividend - Rs 13 Per Share", 22.0),
+    # A total stated first, then broken down.
+    (
+        "Annual General Meeting And Dividend Rs.50/- Per Share (Special Dividend Rs.25/- Per Share And Final Dividend Rs.25/- Per Share)",
+        50.0,
+    ),
+    ("Dividend-Rs.8.50 Per Share (Including Special Dividend Of Rs.2/- Per Share).", 8.5),
+    (
+        "Distribution - Re 0.45 Per Unitconsisiting Of Interest - Re 0.13 Per Unit / Return On Capital - Re 0.32 Per Unit",
+        0.45,
+    ),
+    (
+        "Distritbution - Rs 2.98 Per Unit Comprising Of Rs 1.84 Per Unit In The Form Dividend & Re 0.85 Per Unit In The Form Of Interest & Re 0.29 Per Unit In The Form Of Repayment Of Loan",
+        2.98,
+    ),
+    # Bare numbers that are not cash stay out.
+    ("Interim Dividend @ 12% On Equity Shares.", None),
+    ("Agm And Final Dividend Of Rs 1.25 Per Share (12.5%)", 1.25),
+    ("Distribution Rs 3 Per Unit For The First Quarter Of Fy 2018-19(Purpose Revised)", 3.0),
+    ("3rd Interim Dividend Re 0.40 Per Share", 0.4),
+]
+
+
+@pytest.mark.parametrize("text,cash", CASH_SHAPES)
+def test_dividend_cash_shapes(text, cash):
+    from pipeline.actions.parse import dividend_cash
+
+    assert dividend_cash(text) == cash
+
+
+@pytest.mark.parametrize(
+    "text,cash",
+    [
+        ("Annual General Meeting / Dividend 2024/25 - Rs 5 Per Share", 5.0),
+        ("Dividend 12/07/2025 - Rs 5 Per Share", 5.0),
+        ("Interim Dividend 1/2% On Equity Shares", None),
+        ("Dividend Rs 1 Per Share Of Rs:- 10 Each", 1.0),
+        ("Dividend Rs 1 Per Share Of R E 10 Each", 1.0),
+        ("Dividend (Rs 2 Per Share And Special Dividend Rs 2 Per Share)", 4.0),
+        ("Dividend Rs 0.25 Per Share (Special Dividend Rs 0.249 Per Share)", 0.499),
+        (
+            "Dividend (Rs 50 Per Share (Special Dividend Rs 25 And Final Dividend Rs 25))",
+            50.0,
+        ),
+        ("Dividend Re 0.3 (Special Dividend Re 0.1 And Final Dividend Re 0.2)", 0.3),
+    ],
+)
+def test_dividend_cash_guards(text, cash):
+    from pipeline.actions.parse import dividend_cash
+
+    assert dividend_cash(text) == cash
+
+
 # The exchange writes a face value split a dozen ways and often without the word "from". These
 # shapes all appear in the live NSE feed and all used to parse without a ratio, which silently
 # became an adjustment factor of 1.0 and left prices unadjusted across the split.

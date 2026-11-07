@@ -431,10 +431,15 @@ jobs:
           # delete-pattern drops the one-off date-range action files a
           # manual fetch once left beside the per-year files; they would
           # double count for anyone globbing actions/*.parquet.
+          # HF gets metrics and universe only up to the month start; the
+          # API and R2 keep the daily files.
+          tej-bazaar hf-stage --src data/derived --dst data/hf \
+            --as-of "${{ needs.prices.outputs.date }}"
           tej-bazaar publish \
             --repo tejhq/indian-markets \
-            --data-dir data/derived \
+            --data-dir data/hf \
             --delete-pattern "actions/*_????????_????????.parquet" \
+            --delete-pattern "metrics/*_latest.parquet" \
             -m "daily: ${{ needs.prices.outputs.date }} actions + adjusted + symbol-history + metrics"
 
       - name: Publish pipeline status (derived)

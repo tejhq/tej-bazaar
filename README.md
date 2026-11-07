@@ -115,6 +115,10 @@ cron also writes one file per calendar month, `metrics/<ex>_YYYY-MM.parquet`,
 sorted by date, to R2 only (`--slices-dir`); the screener reads those for
 historical dates instead of scanning a whole year file.
 
+HuggingFace gets a copy cut at the start of the current month (`tej-bazaar
+hf-stage`): year files up to the previous month, no `_latest`. The same cut
+applies to `universe/`. R2 and the API keep the daily files.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `date`, `symbol`, `isin`, `adj_close` | (as above) | Carried for joining |
@@ -355,7 +359,7 @@ BSE gross deliverables file (SCBSEALL, official EOD)
 Each run sweeps the last seven calendar days rather than one date, because GitHub starts a scheduled run late, by four hours and more, and a start past 18:30 UTC is already the next day in IST. A run that asked for the wrong date used to write nothing and still go green, which is how 24 and 25 September 2026 went missing. Days already present are skipped, so the sweep is cheap and any gap fills itself. `tej-bazaar check-sessions` then fails the run when a session that the exchange calendar says traded is neither newly fetched nor already published past its due hour, and the alert job fires.
 
 - `prices`: sweep the recent bhavcopies, publish, refresh the year rollup, prune dailies, export and publish edge JSON, write `api/v1/status.json`, publish to HuggingFace with the dataset card (`--card hf/README.md`). Skips cleanly on holidays.
-- `derived`: pull full history from R2, refresh corporate actions, rebuild symbol history, reparse actions, rebuild adjusted prices, metrics (year files, `_latest`, and R2-only month slices under `data/api/metrics`) and universe into `data/derived/`, publish that directory only, then rewrite `status.json` with `derived_published_at`. A failure here publishes nothing stale and fails the run, so GitHub emails on it. Only the NSE corporate-actions website fetch is allowed to fail, falling back to the history already on R2.
+- `derived`: pull full history from R2, refresh corporate actions, rebuild symbol history, reparse actions, rebuild adjusted prices, metrics (year files, `_latest`, and R2-only month slices under `data/api/metrics`) and universe into `data/derived/`, publish that directory only (to HF through `hf-stage`, which cuts metrics and universe at the month start), then rewrite `status.json` with `derived_published_at`. A failure here publishes nothing stale and fails the run, so GitHub emails on it. Only the NSE corporate-actions website fetch is allowed to fail, falling back to the history already on R2.
 - `delivery`: after `prices`, and even when it failed, fetch NSE's and BSE's delivery files for the same seven days, fold them into the `delivery/nse/` and `delivery/bse/` year rollups on R2 and publish to HuggingFace. A file still missing at its due hour, 18:00 IST for NSE and 21:00 IST for BSE, gets a `::warning::` and the next run's sweep fetches it; `check-sessions --grace 3` fails the run once a session is still missing at that hour three trading days later.
 
 Manual runs: `gh workflow run daily-bhavcopy -f date=YYYY-MM-DD`, `-f from=D -f to=D` to backfill a range, or `-f lookback=30` to widen the sweep. Set the `ALERT_WEBHOOK_URL` secret for Discord or Slack failure pings.

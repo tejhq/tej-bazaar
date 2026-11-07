@@ -59,6 +59,7 @@ from pipeline.fetch import (
 )
 from pipeline.fo import FO_KEY, fetch_nse_fo, fo_csv_name, parse_fo
 from pipeline.parse import parse_bhavcopy
+from pipeline.hf_stage import month_start, stage_for_hf
 from pipeline.publish import DEFAULT_REPO_ID, PublishError, publish_to_hf
 from pipeline.publish_r2 import DEFAULT_BUCKET as DEFAULT_R2_BUCKET
 from pipeline.publish_r2 import PublishError as PublishR2Error
@@ -510,6 +511,21 @@ def info(
             f"{size_mb:.2f} MB",
         )
     console.print(table)
+
+
+@app.command("hf-stage")
+def hf_stage(
+    src: Annotated[Path, typer.Option("--src", help="Derived tree to copy")],
+    dst: Annotated[Path, typer.Option("--dst", help="Staging dir for the HF upload")],
+    as_of: Annotated[
+        str | None, typer.Option("--as-of", help="YYYY-MM-DD, default today (UTC)")
+    ] = None,
+) -> None:
+    """Copy the derived tree with metrics and universe cut at the month start."""
+    d = date.fromisoformat(as_of) if as_of else datetime.now(timezone.utc).date()
+    cutoff = month_start(d)
+    files = stage_for_hf(src, dst, cutoff)
+    console.print(f"staged {dst}: metrics and universe before {cutoff}, {len(files)} files")
 
 
 @app.command()

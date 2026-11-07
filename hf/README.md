@@ -45,7 +45,7 @@ configs:
 
 # tejhq/indian-markets
 
-End-of-day data for every **NSE** and **BSE** listed equity, built straight from the exchanges' official bhavcopy. Seven parquet trees: raw prices, corporate actions, back-adjusted prices, symbol history, derived metrics, a survivorship-bias-free liquidity universe, and NSE and BSE delivery quantity and delivery %. Refreshed every trading day by an open pipeline.
+End-of-day data for every **NSE** and **BSE** listed equity, built straight from the exchanges' official bhavcopy. Seven parquet trees: raw prices, corporate actions, back-adjusted prices, symbol history, derived metrics, a survivorship-bias-free liquidity universe, and NSE and BSE delivery quantity and delivery %. Prices, actions, adjusted prices, symbol history and delivery are refreshed every trading day by an open pipeline. Metrics and the universe here run to the end of the previous month; the daily versions are on the API.
 
 No broker, no auth, no scraping. The same data is served at [api.tejhq.dev](https://api.tejhq.dev) and mirrored on Cloudflare R2.
 
@@ -127,7 +127,7 @@ One file per exchange. Each row is one contiguous interval.
 
 ### 5. `metrics/`: returns and rolling stats
 
-One file per exchange per year, plus `<ex>_latest.parquet` with only the newest trading day for quick cross-sectional reads. Computed on `adj_close`; volume and turnover on raw values.
+One file per exchange per year, up to the last trading day of the previous month. Computed on `adj_close`; volume and turnover on raw values. Daily metrics, including the newest trading day, are on the API (`/v1/metrics`, `/v1/screener`) with a Retail or Pro key.
 
 | Field | Type | Notes |
 |-------|------|-------|
@@ -143,7 +143,7 @@ Rolling fields are null until a full window of history exists. No partial window
 
 ### 6. `universe/`: point-in-time liquidity universe
 
-One file per exchange: `universe/<ex>_liquid.parquet`. On the first trading day of each month, instruments are ranked by trailing 63-trading-day mean turnover and the top 500 are kept. Membership uses only data available on the rebalance date, so a name that later delisted still appears in the months it qualified for.
+One file per exchange: `universe/<ex>_liquid.parquet`. On the first trading day of each month, instruments are ranked by trailing 63-trading-day mean turnover and the top 500 are kept. Membership uses only data available on the rebalance date, so a name that later delisted still appears in the months it qualified for. This file holds rebalances up to the previous month; the current month's list is on the API (`/v1/universe`).
 
 | Field | Type | Notes |
 |-------|------|-------|
@@ -213,7 +213,7 @@ actions = load_dataset("tejhq/indian-markets", "actions")
 curl "https://api.tejhq.dev/v1/ohlcv/nse/RELIANCE?from=2024-01-01&to=2024-12-31"
 ```
 
-No key needed for prices, snapshots, actions and the pipeline status at `/v1/status`. Adjusted prices and symbol history need a free key from [tejhq.dev/keys](https://tejhq.dev/keys). Metrics, universe, batch, resolve and the screener are on the Pro tier.
+No key needed for prices, snapshots, actions and the pipeline status at `/v1/status`. Adjusted prices and symbol history need a free key from [tejhq.dev/keys](https://tejhq.dev/keys). Daily metrics, the current universe, batch, resolve, the screener and NSE F&O need a Retail or Pro key.
 
 ## Caveats
 

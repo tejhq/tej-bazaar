@@ -204,6 +204,23 @@ The pipeline is MIT, so you can build the same tree yourself from NSE.
 | `last`, `prev_close`, `underlying` | Float64 | UDiFF only (2024-07-08 on), null before |
 | `trades`, `lot_size` | Int64 | UDiFF only, null before |
 
+#### 8b. F&O stats (`fo_stats/`, private bucket)
+
+One file per year, `fo_stats/nse_<YYYY>.parquet`, one row per `(date, symbol, expiry)`, built by `tej-bazaar fo stats --year Y` from the F&O tree and served at `/v1/fo/stats/{symbol}`. Sorted by symbol with 5,000-row groups so a one-symbol read skips the rest.
+
+| Field | Notes |
+|-------|-------|
+| `kind` | `index` or `stock` |
+| `is_nearest` | Nearest expiry with any contract that day, often a weekly option expiry |
+| `ce_oi`, `pe_oi`, `ce_oi_change`, `pe_oi_change`, `ce_contracts`, `pe_contracts` | Option totals for the expiry; CA/PA before 2011 count as CE/PE |
+| `pcr_oi`, `pcr_volume` | `pe / ce` by open interest and by contracts, null when the CE side is 0 |
+| `max_pain` | Strike minimising `sum(ce_oi * max(0, S - K) + pe_oi * max(0, K - S))` over the expiry's strikes |
+| `strikes` | Strikes with open interest |
+| `fut_settle`, `fut_settle_change`, `fut_oi`, `fut_oi_change`, `fut_contracts` | The expiry's future; change against the previous session's settle of the same contract (the previous year's last week is read for January) |
+| `buildup` | Settle up and OI up `long_buildup`, down and up `short_buildup`, up and down `short_covering`, down and down `long_unwinding`; null when either is unchanged |
+| `underlying`, `basis` | From 2024-07-08; `basis = fut_settle - underlying` |
+| `rollover_pct` | Futures OI outside the nearest futures expiry as a percent of all futures OI that day |
+
 #### 9. API edge JSON (`api/v1/`, R2 only)
 
 `tej-bazaar export-json` pre-renders the tej-api free tier as static JSON:

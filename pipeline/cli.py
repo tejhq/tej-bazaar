@@ -59,6 +59,12 @@ from pipeline.fetch import (
 )
 from pipeline.fo import FO_KEY, fetch_nse_fo, fo_csv_name, parse_fo
 from pipeline.fo_stats import compute_fo_stats
+
+FO_STATS_COLS = [
+    "date", "instrument", "symbol", "expiry", "strike", "option_type", "close",
+    "settle_price", "contracts", "open_interest", "oi_change", "underlying",
+]
+from pipeline.fo_greeks import compute_fo_greeks, expiry_iv
 from pipeline.unusual import compute_unusual
 from pipeline.parse import parse_bhavcopy
 from pipeline.hf_stage import month_start, stage_for_hf
@@ -824,8 +830,11 @@ def fo_stats(
     year: Annotated[int, typer.Option("--year", help="Calendar year to compute")],
     fo_dir: Annotated[Path, typer.Option("--fo-dir", help="F&O tree root holding nse/year=YYYY/")] = DEFAULT_FO_OUT_DIR,
     out_dir: Annotated[Path, typer.Option("--out-dir")] = Path("data/stats/fo_stats"),
+    greeks_dir: Annotated[Path, typer.Option("--greeks-dir")] = Path("data/stats/fo_greeks"),
 ) -> None:
-    """Per-underlying, per-expiry daily stats (PCR, max pain, buildup, rollover) for one year.
+    """Per-underlying, per-expiry daily stats (PCR, max pain, buildup, rollover, ATM IV, skew) for one year.
+
+    Also writes IV and Greeks for every traded option to `<greeks-dir>/nse_<year>.parquet`.
 
     Reads the year's rollup and dailies, plus the previous year's last week
     when present so the first session gets a settle change. Writes
@@ -840,8 +849,25 @@ def fo_stats(
     prev = sorted((root / f"year={year - 1}").rglob("*.parquet"))
     if prev:
         frames.append(pl.scan_parquet(prev).filter(pl.col("date") >= date(year - 1, 12, 20)))
-    df = pl.concat(frames, how="diagonal_relaxed").unique(subset=FO_KEY, keep="last").collect()
-    out = compute_fo_stats(df, since=date(year, 1, 1))
+    cols = [*dict.fromkeys([*FO_KEY, *FO_STATS_COLS])]
+    df = pl.concat([f.select(cols) for f in frames], how="diagonal_relaxed").unique(subset=FO_KEY, keep="last").collect()
+    cur_df = df.filter(pl.col("date") >= date(year, 1, 1))
+    greeks = pl.concat(
+        [
+            compute_fo_greeks(m)
+            for m in cur_df.with_columns(pl.col("date").dt.month().alias("_m")).partition_by("_m", include_key=False)
+        ]
+        if not cur_df.is_empty()
+        else [compute_fo_greeks(cur_df)]
+    )
+    del cur_df
+    greeks_dir.mkdir(parents=True, exist_ok=True)
+    gpath = greeks_dir / f"nse_{year}.parquet"
+    greeks.sort(["symbol", "date", "expiry", "strike", "option_type"]).write_parquet(
+        gpath, compression="zstd", row_group_size=20_000
+    )
+    console.print(f"fo greeks {year}: {greeks.height:,} rows, {greeks['iv'].null_count():,} without IV -> {gpath}")
+    out = compute_fo_stats(df, since=date(year, 1, 1), iv=expiry_iv(greeks))
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"nse_{year}.parquet"
     out.write_parquet(path, compression="zstd", row_group_size=5_000)

@@ -34,12 +34,13 @@ _RE_MONEY = re.compile(
 )
 
 # An amount with no marker, right after a payout word: "Dividend - 1.40 Per Share", "Special
-# Dividend 243 Per Share", "Proceeds - 1.98 Per Unit", "Dividend 1 Rs Per Share", "Dividend - S 5/-".
-# It has to be followed by "/-", "per", "Rs", a breakdown or the end of a clause, so years
-# ("Fy 2018-19") and percentages ("Dividend @ 12%", "Dividend 50 Per Cent") stay out. A bare year
-# closing a clause ("Interim Dividend 2026") is not an amount either; "Rs 2026" still is.
+# Dividend 243 Per Share", "Proceeds - 1.98 Per Unit", "Dividend 1 Rs Per Share", "Dividend - S 5/-",
+# "Div.@1.20 Per Share". It has to be followed by "/-", "per", "Rs", a breakdown or the end of a
+# clause, so years ("Fy 2018-19") and percentages ("Dividend @ 12%", "Dividend 50 Per Cent") stay
+# out. A bare year closing a clause ("Interim Dividend 2026") is not an amount either; "Rs 2026"
+# still is.
 _RE_BARE_MONEY = re.compile(
-    r"\b(?:dividend|distribution|special|interest|proceeds|refund)\s*[:\-]?\s*(?:s\s+)?"
+    r"\b(?:dividend|div|distribution|special|interest|proceeds|refund)\s*[:\-]?\s*(?:\.?@\s*|s\s+)?"
     r"(?!(?:19|20)\d\d\s*(?:$|[+&]|/(?!-)))"
     r"(\d+(?:\.\d+)?)(?=\s*(?:/-)?\s*(?:per\b(?!\s*-?\s*cent)|pr\b|rs\b|consist|compris|$|[+&]|/(?!\s*\d)))",
     re.I,
@@ -102,6 +103,24 @@ def _parse_date(s: str | None) -> date | None:
     return None
 
 
+# "Dividend" abbreviated or misspelt: "Int Div-Rs.2/-", "Agm/Div-Rs.3.50", "Fin.Div.Re.0.60",
+# "Interim Dividned", "Divdend", "Divided", "Dividen", "Diviednd", "Ividend", and "Distributn". A word
+# starting "div" with a later "d" is a misspelt dividend; "division" has none, and "sub-divided" is a
+# split.
+_RE_DIVIDEND_WORD = re.compile(r"\bdiv\b|(?<!sub-)\bdiv\w*d|\bividend|\bdistributn")
+
+# InvIT and REIT payouts that never say "dividend": "Interest Amount - Rs 1.20 Per Unit/ Return On
+# Capital - Rs 1.40 Per Unit", "Interest And Principal Repayment - Rs 5.60 Per Unit". They count only
+# with an amount; "Interest Payment" alone has nothing to apply.
+_RE_UNIT_PAYOUT = re.compile(r"nterest|return o[nf] capital|principal|repayment")
+
+# An AGM line whose meeting words are followed straight by a per-share amount is its dividend:
+# "Annual General Meeting- Re 0.85 Per Share".
+_RE_AGM_AMOUNT = re.compile(
+    r"(?:general\s+meeting|\bagm)\W*\bre?s?\.?\s*-?\s*\d+(?:\.\d+)?\s*(?:/-)?\s*per\s+(?:equity\s+)?share"
+)
+
+
 def _classify(text: str) -> ActionType:
     """Map free-text to ActionType. Order matters: price-impacting wins over AGM."""
     t = text.lower()
@@ -121,7 +140,7 @@ def _classify(text: str) -> ActionType:
         return "bonus"
     if re.search(r"\brights?\b", t):
         return "rights"
-    if "dividend" in t or "distribution" in t:
+    if "dividend" in t or "distribution" in t or _RE_DIVIDEND_WORD.search(t):
         return "dividend"
     if "buy back" in t or "buyback" in t:
         return "buyback"
@@ -129,8 +148,14 @@ def _classify(text: str) -> ActionType:
         return "demerger"
     if "merger" in t or "amalgamation" in t:
         return "merger"
+    if (
+        _RE_UNIT_PAYOUT.search(t)
+        and not re.search(r"\b(?:reduction|scheme)\b", t)
+        and dividend_cash(text) is not None
+    ):
+        return "dividend"
     if "general meeting" in t or re.search(r"\b[ae]\.?g\.?m\.?\b", t):
-        return "agm"
+        return "dividend" if _RE_AGM_AMOUNT.search(t) else "agm"
     return "other"
 
 
@@ -168,9 +193,11 @@ def _extract_details(
     return None, None, None, None, None
 
 
-# "Per Equity Share Of Rs.10/- Each", "face value Rs 2": a par value, not cash.
+# "Per Equity Share Of Rs.10/- Each", "Per Equity Share Re.1/- Each", "face value Rs 2": a par value,
+# not cash.
 _RE_PAR_NOTE = re.compile(
-    r"(?:(?:share|unit)s?\s+of\s+|face\s+value\s+(?:of\s+)?)(?:R(?:\s?e)?s?\.?)\s*:?\s*-?\s*\d+(?:\.\d+)?\s*(?:/-)?\s*(?:each)?",
+    r"(?:(?:share|unit)s?\s+of\s+|face\s+value\s+(?:of\s+)?)(?:R(?:\s?e)?s?\.?)\s*:?\s*-?\s*\d+(?:\.\d+)?\s*(?:/-)?\s*(?:each)?"
+    r"|(?<=\d)(?:/-)?\s+per\s+(?:equity\s+)?(?:share|unit)s?\s+R(?:\s?e)?s?\.?\s*:?\s*-?\s*\d+(?:\.\d+)?\s*(?:/-)?\s*each",
     re.I,
 )
 _RE_TOTAL_THEN_BREAKDOWN = re.compile(r"compris|consis|includ|break", re.I)

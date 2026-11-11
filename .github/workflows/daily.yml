@@ -632,6 +632,14 @@ jobs:
             rm -rf data/out/fo/nse/year="$YEAR"/month=*
           done
 
+      - name: F&O stats for the touched years
+        if: steps.fetched.outputs.years != ''
+        run: |
+          for YEAR in ${{ steps.fetched.outputs.years }}; do
+            tej-bazaar fo stats --year "$YEAR" --fo-dir data/out/fo --out-dir data/stats/fo_stats
+          done
+          tej-bazaar publish-r2 --data-dir data/stats --bucket "$FO_BUCKET"
+
       - name: F&O may lag, but not by three trading days
         run: |
           tej-bazaar check-sessions \

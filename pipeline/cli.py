@@ -59,6 +59,7 @@ from pipeline.fetch import (
 )
 from pipeline.fo import FO_KEY, fetch_nse_fo, fo_csv_name, parse_fo
 from pipeline.fo_stats import compute_fo_stats
+from pipeline.unusual import compute_unusual
 from pipeline.parse import parse_bhavcopy
 from pipeline.hf_stage import month_start, stage_for_hf
 from pipeline.publish import DEFAULT_REPO_ID, PublishError, publish_to_hf
@@ -845,6 +846,41 @@ def fo_stats(
     path = out_dir / f"nse_{year}.parquet"
     out.write_parquet(path, compression="zstd", row_group_size=5_000)
     console.print(f"fo stats {year}: {out.height:,} rows, {out['date'].n_unique()} days -> {path}")
+
+
+@app.command("unusual")
+def unusual(
+    year: Annotated[int, typer.Option("--year", help="Calendar year to compute")],
+    exchange: Annotated[str, typer.Option("--exchange")] = "nse",
+    adjusted_dir: Annotated[Path, typer.Option("--adjusted-dir", help="Holds <ex>_<YYYY>.parquet")] = Path("data/derived/prices_adjusted"),
+    delivery_dir: Annotated[Path, typer.Option("--delivery-dir", help="Delivery tree root holding <ex>/year=YYYY/")] = Path("data/out/delivery"),
+    fo_stats_dir: Annotated[Path, typer.Option("--fo-stats-dir", help="Holds nse_<YYYY>.parquet")] = Path("data/stats/fo_stats"),
+    out_dir: Annotated[Path, typer.Option("--out-dir")] = Path("data/stats/unusual"),
+) -> None:
+    """Days a stock did something far outside its own recent normal, for one year.
+
+    Reads the year and the one before from each tree so the trailing windows
+    are full on 1 January. Delivery and F&O stats are optional. Writes
+    `<out-dir>/<ex>_<year>.parquet`.
+    """
+    _banner()
+    ex = exchange.lower()
+    years = [year - 1, year]
+    adj = [adjusted_dir / f"{ex}_{y}.parquet" for y in years]
+    adj = [p for p in adj if p.exists()]
+    if not adj or adj[-1].name != f"{ex}_{year}.parquet":
+        raise typer.BadParameter(f"no {ex}_{year}.parquet under {adjusted_dir}")
+    prices = pl.concat([pl.read_parquet(p) for p in adj], how="diagonal_relaxed")
+    dl = [f for y in years for f in sorted((delivery_dir / ex / f"year={y}").rglob("*.parquet"))]
+    delivery = pl.concat([pl.read_parquet(f) for f in dl], how="diagonal_relaxed").unique(["date", "symbol", "series"], keep="last") if dl else None
+    fs = [fo_stats_dir / f"nse_{y}.parquet" for y in years] if ex == "nse" else []
+    fs = [p for p in fs if p.exists()]
+    fo = pl.read_parquet(fs) if fs else None
+    out = compute_unusual(prices, delivery, fo, since=date(year, 1, 1))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{ex}_{year}.parquet"
+    out.write_parquet(path, compression="zstd", row_group_size=5_000)
+    console.print(f"unusual {ex} {year}: {out.height:,} rows over {out['date'].n_unique()} days -> {path}")
 
 
 actions_app = typer.Typer(

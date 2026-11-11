@@ -651,9 +651,10 @@ jobs:
 
   unusual:
     # Unusual-activity flags for NSE, built from adjusted prices, delivery and
-    # F&O stats once all three are published. Private bucket only, like F&O.
+    # F&O stats once all three are published. Any of them failing skips this
+    # job, so no file goes out with a signal missing. Private bucket only.
     needs: [prices, derived, delivery, fo]
-    if: ${{ !cancelled() && needs.derived.result == 'success' && vars.FO_BUCKET != '' }}
+    if: ${{ !cancelled() && needs.derived.result == 'success' && needs.delivery.result == 'success' && needs.fo.result == 'success' && vars.FO_BUCKET != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -673,10 +674,11 @@ jobs:
       - name: Install pipeline
         run: uv sync --locked
 
-      - name: Pull inputs for this year and last
+      - name: Pull inputs for the swept years and the year before each
         run: |
-          YEAR="${{ needs.prices.outputs.year }}"
-          for Y in $((YEAR - 1)) "$YEAR"; do
+          FROM="${{ needs.prices.outputs.from }}"
+          TO="${{ needs.prices.outputs.to }}"
+          for Y in $(seq $((${FROM%%-*} - 1)) "${TO%%-*}"); do
             tej-bazaar pull-r2 --prefix "prices_adjusted/nse_$Y.parquet" --data-dir data/derived --bucket tej-bazaar
             tej-bazaar pull-r2 --prefix "delivery/nse/year=$Y/" --data-dir data/out --bucket tej-bazaar
             tej-bazaar pull-r2 --prefix "fo_stats/nse_$Y.parquet" --data-dir data/stats --bucket "$FO_BUCKET"
@@ -684,7 +686,11 @@ jobs:
 
       - name: Build and publish
         run: |
-          tej-bazaar unusual --year "${{ needs.prices.outputs.year }}" --exchange nse
+          FROM="${{ needs.prices.outputs.from }}"
+          TO="${{ needs.prices.outputs.to }}"
+          for Y in $(seq "${FROM%%-*}" "${TO%%-*}"); do
+            tej-bazaar unusual --year "$Y" --exchange nse
+          done
           tej-bazaar publish-r2 --data-dir data/stats/unusual --prefix unusual --bucket "$FO_BUCKET"
 
   alert:
@@ -703,5 +709,5 @@ jobs:
             echo "ALERT_WEBHOOK_URL not set; skipping webhook"; exit 0
           fi
           curl -fsS -X POST -H 'Content-Type: application/json' "$WEBHOOK" -d @- <<JSON
-          {"content":"tej-bazaar daily FAILED for ${{ needs.prices.outputs.date }}: prices=${{ needs.prices.result }} derived=${{ needs.derived.result }} delivery=${{ needs.delivery.result }} fo=${{ needs.fo.result }} unusual=${{ needs.unusual.result }} unusual=${{ needs.unusual.result }} ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}
+          {"content":"tej-bazaar daily FAILED for ${{ needs.prices.outputs.date }}: prices=${{ needs.prices.result }} derived=${{ needs.derived.result }} delivery=${{ needs.delivery.result }} fo=${{ needs.fo.result }} unusual=${{ needs.unusual.result }} ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}
           JSON

@@ -11,6 +11,7 @@ previous session's settle of the same contract, and the change in open
 interest. rollover_pct is futures open interest outside the nearest expiry as
 a share of all futures open interest of the symbol that day. is_nearest
 marks the nearest expiry with any contract, often a weekly option expiry.
+atm_iv and iv_skew come from `pipeline.fo_greeks.expiry_iv` when passed in.
 """
 
 from __future__ import annotations
@@ -44,6 +45,8 @@ STATS_SCHEMA: dict[str, pl.DataType] = {
     "underlying": pl.Float64,
     "basis": pl.Float64,
     "rollover_pct": pl.Float64,
+    "atm_iv": pl.Float64,
+    "iv_skew": pl.Float64,
 }
 
 
@@ -127,7 +130,7 @@ def _futures(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def compute_fo_stats(df: pl.DataFrame, since=None) -> pl.DataFrame:
+def compute_fo_stats(df: pl.DataFrame, since=None, iv: pl.DataFrame | None = None) -> pl.DataFrame:
     """Stats for every (date, symbol, expiry) in df.
 
     df may start before `since` so the first kept day still gets a settle
@@ -165,6 +168,10 @@ def compute_fo_stats(df: pl.DataFrame, since=None) -> pl.DataFrame:
     out = out.with_columns(
         pl.when(fut_total > 0).then((fut_total - near_oi) / fut_total * 100).otherwise(None).alias("rollover_pct")
     )
+    if iv is not None and not iv.is_empty():
+        out = out.join(iv.select(*GROUP, "atm_iv", "iv_skew"), on=GROUP, how="left")
+    else:
+        out = out.with_columns(pl.lit(None, pl.Float64).alias("atm_iv"), pl.lit(None, pl.Float64).alias("iv_skew"))
     if since is not None:
         out = out.filter(pl.col("date") >= since)
     return out.select([pl.col(c).cast(t) for c, t in STATS_SCHEMA.items()]).sort(["symbol", "date", "expiry"])

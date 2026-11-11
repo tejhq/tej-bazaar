@@ -220,6 +220,14 @@ One file per year, `fo_stats/nse_<YYYY>.parquet`, one row per `(date, symbol, ex
 | `buildup` | Settle up and OI up `long_buildup`, down and up `short_buildup`, up and down `short_covering`, down and down `long_unwinding`; null when either is unchanged |
 | `underlying`, `basis` | From 2024-07-08; `basis = fut_settle - underlying` |
 | `rollover_pct` | Futures OI outside the nearest futures expiry as a percent of all futures OI that day |
+| `atm_iv` | IV at the strike nearest the forward, call and put averaged when both traded |
+| `iv_skew` | IV of the put nearest delta -0.25 minus IV of the call nearest delta 0.25; null when either is more than 0.1 away |
+
+#### 8c. Option IV and Greeks (`fo_greeks/`, private bucket)
+
+One file per year, `fo_greeks/nse_<YYYY>.parquet`, written by the same `fo stats` run, one row per option contract that traded that day (contracts > 0, close > 0, not on its expiry day). Sorted by symbol with 20,000-row groups. Served as extra fields on `/v1/fo/chain` and `/v1/fo/contract`.
+
+Black-76 on the forward of the option's own expiry: the same-expiry future's close when it traded, else its settle; with no future, put-call parity at the strike where call and put are closest (`forward_source`). Time is calendar days to expiry over 365, the rate is the RBI repo rate in force that day (`pipeline/fo_greeks.py`), and CA/PA are treated as European. `iv` is null when the close is outside the no-arbitrage bounds. `delta` and `gamma` are against the forward, `theta` per calendar day, `vega` per volatility point. Illiquid strikes print stale closes, so filter on `contracts` before trusting a wing.
 
 #### 9. API edge JSON (`api/v1/`, R2 only)
 

@@ -303,3 +303,35 @@ def test_large_plan_uses_prefix_listing(tmp_path: Path, monkeypatch):
     client.get_paginator.return_value.paginate.assert_called_once_with(Bucket="b", Prefix="api/v1/ohlcv/nse/")
     put_keys = [c.kwargs["Key"] for c in client.put_object.call_args_list]
     assert put_keys == ["api/v1/ohlcv/nse/B.json"]
+
+
+def test_list_prefixes_scopes_each_top_level_folder():
+    from pipeline.publish_r2 import _list_prefixes
+
+    keys = [
+        "api/v1/actions/TCS.json",
+        "api/v1/actions/INFY.json",
+        "metrics/2026-11/nse.parquet",
+    ]
+    assert _list_prefixes(keys) == ["api/v1/actions/", "metrics/2026-11/"]
+
+
+def test_list_etags_retries_then_succeeds(monkeypatch):
+    from pipeline import publish_r2
+
+    monkeypatch.setattr(publish_r2, "LIST_BACKOFF_SECONDS", 0)
+    calls = {"n": 0}
+
+    class Pager:
+        def paginate(self, **_kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("ServiceUnavailable")
+            return [{"Contents": [{"Key": "a/b.json", "ETag": '"x"'}]}]
+
+    class S3:
+        def get_paginator(self, _name):
+            return Pager()
+
+    assert publish_r2._list_etags(S3(), "bkt", "a/") == {"a/b.json": "x"}
+    assert calls["n"] == 2

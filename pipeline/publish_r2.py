@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date as date_cls
@@ -196,7 +197,9 @@ def _filter_uploads(
     ETags per request rather than one.
     """
     if len(plan) > LIST_THRESHOLD:
-        remote_etags = _list_etags(s3, bucket, _common_prefix([key for _p, key, _m, _c in plan]))
+        remote_etags: dict[str, str] = {}
+        for prefix in _list_prefixes([key for _p, key, _m, _c in plan]):
+            remote_etags.update(_list_etags(s3, bucket, prefix))
         return [
             (path, key, md5, cache)
             for path, key, md5, cache in plan
@@ -222,16 +225,32 @@ def _common_prefix(keys: list[str]) -> str:
     return pfx[: pfx.rfind("/") + 1] if "/" in pfx else ""
 
 
+def _list_prefixes(keys: list[str]) -> list[str]:
+    """One listing prefix per top-level folder, so mixed plans never list the whole bucket."""
+    groups: dict[str, list[str]] = {}
+    for key in keys:
+        groups.setdefault(key.split("/", 1)[0], []).append(key)
+    return sorted(_common_prefix(g) for g in groups.values())
+
+
+LIST_ATTEMPTS = 3
+LIST_BACKOFF_SECONDS = 15.0
+
+
 def _list_etags(s3: Any, bucket: str, prefix: str) -> dict[str, str]:
-    out: dict[str, str] = {}
-    try:
-        paginator = s3.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-            for obj in page.get("Contents", []):
-                out[obj["Key"]] = obj.get("ETag", "").strip('"')
-    except Exception as e:  # noqa: BLE001
-        raise PublishError(f"list_objects failed for prefix {prefix!r}: {e}") from e
-    return out
+    for attempt in range(1, LIST_ATTEMPTS + 1):
+        out: dict[str, str] = {}
+        try:
+            paginator = s3.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                for obj in page.get("Contents", []):
+                    out[obj["Key"]] = obj.get("ETag", "").strip('"')
+            return out
+        except Exception as e:  # noqa: BLE001
+            if attempt == LIST_ATTEMPTS:
+                raise PublishError(f"list_objects failed for prefix {prefix!r}: {e}") from e
+            time.sleep(LIST_BACKOFF_SECONDS * attempt)
+    return {}
 
 
 def _remote_etag(s3: Any, bucket: str, key: str) -> str | None:

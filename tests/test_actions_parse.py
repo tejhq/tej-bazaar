@@ -465,6 +465,88 @@ def test_dividend_cash_guards(text, cash):
     assert dividend_cash(text) == cash
 
 
+# Payouts the feed writes without the word "dividend", all from real announcements. Each was typed
+# other or agm, so its cash never reached the adjustment.
+PAYOUT_SHAPES = [
+    # "Div" abbreviated, after "Int", "Fin", "Spl" or "Agm".
+    ("Int Div-Rs.2/- Per Share", 2.0),
+    ("2nd Int Div-Rs.4/- Pr Shrpurpose Revised", 4.0),
+    ("Int Div- 2 Per Share (Purpose Revised)", 2.0),
+    ("Agm/Div-Rs.3.50 Per Share", 3.5),
+    ("Annual General Meeting/Fin.Div.Re.0.60 Per Share", 0.6),
+    ("Annual General Meeting / Div Of Re. 1/- Per Equity Share", 1.0),
+    ("Div-Fin Rs.12.5+Int Rs.9 Purpose Revised", 21.5),
+    ("Agm/Spl Div- Rs.5/- Div-7.5/-", 12.5),
+    ("Agm/Div-Rs.2/Rh2:9@Prm215", 2.0),
+    ("Interim Div. Of Re. 0.70/- Per Equity Share Re.1/- Each", 0.7),
+    ("Annual General Meeting/Div.@1.20 Per Share", 1.2),
+    # Misspelt.
+    ("Interim Dividned - Rs 135 Per Share", 135.0),
+    ("Interim Divdend - Rs 7.60 Per Share", 7.6),
+    ("Interim Divided - Rs 2.35/- Per Share (Purpose Revised)", 2.35),
+    ("Interim Dividen Rs 5 Per Share", 5.0),
+    ("Aanual General Meeting/ Diviednd Rs 0.50 Per Share", 0.5),
+    ("Annual General Meeting / Dividiend - Rs 3/- Per Share", 3.0),
+    ("Annual General Meeting / Divividend - Rs 2/- Per Share", 2.0),
+    ("Annual General Meeting/Divdiend Of Rs.3.50 Per Share", 3.5),
+    ("Annual General Meeing/Ividend - Rs 6 Per Share", 6.0),
+    ("Interim Divdend", None),
+    (
+        "Distributn - Rs 3.13984 Per Unit Consist Of Rs 3.13797 Per Unit As Interest / Re 0.00187 Per Unit As Other Income",
+        3.13984,
+    ),
+    # No payout word: an AGM line carrying its dividend, and InvIT or REIT payouts.
+    ("Annual General Meeting- Re 0.85 Per Share (Purpose Revised)", 0.85),
+    ("Interest Amount - Rs 1.20 Per Unit/ Return On Capital - Rs 1.40 Per Unit", 2.6),
+    ("Interest And Principal Repayment - Rs 5.60 Per Unit", 5.6),
+    ("Nterest Amount- Rs 3.0556/Return Of Capital- Rs 0.2444", 3.3),
+    ("Return On Capital - Re 1 Per Unit/ Interest Amount - Rs 1.20 Per Unit", 2.2),
+    ("Interest - Rs 0.60 Per Unit", 0.6),
+]
+
+
+@pytest.mark.parametrize("text,cash", PAYOUT_SHAPES)
+def test_payouts_without_the_word_dividend_are_dividends(text, cash):
+    assert _classify(text) == "dividend"
+    assert _extract_details("dividend", text)[2] == cash
+
+
+@pytest.mark.parametrize(
+    "text,cash",
+    [
+        ("Dividend Per Share Rs 5 Each", 5.0),
+        ("Dividend Per Share Rs 5 Each / Special Dividend Rs 2 Per Share", 7.0),
+    ],
+)
+def test_dividend_cash_keeps_per_share_payouts(text, cash):
+    assert _extract_details("dividend", text)[2] == cash
+
+
+@pytest.mark.parametrize(
+    "text,kind",
+    [
+        ("Interest Payment", "other"),
+        ("InvIT - Return of Capital", "other"),
+        ("Capital Reduction -  From Rs 10/- To Rs 4/- Per Share", "other"),
+        (
+            "4 Ccps (2 Series A Ccps And 2 Series B Ccps) Issued @ Premium Of Rs 540 Per Ccps For 9 Eq Shares",
+            "other",
+        ),
+        ("Annual General Meeting", "agm"),
+        ("Annual General Meeting / Capital Reduction Rs 10 To Rs 4 Per Share", "agm"),
+        ("Capital Reduction - From Rs 10 To Rs 4 Per Share / Repayment Of Rs 6 Per Share", "other"),
+        ("Reduction Of Capital - Repayment Of Rs 6 Per Share", "other"),
+        ("Scheme Of Arrangement - Repayment Of Capital Rs 5 Per Share", "other"),
+        ("Buy Back - Principal Repayment Rs 100 Per Share", "buyback"),
+        ("Demerger - Repayment Of Capital Rs 5 Per Share", "demerger"),
+        ("Face Value Split (Sub-Division) - From Rs 10/- Per Share To Re 1/- Per Share", "split"),
+        ("Equity Shares Sub-Divided Into Shares Of Rs 2 Each", "other"),
+    ],
+)
+def test_lines_that_are_not_payouts_keep_their_type(text, kind):
+    assert _classify(text) == kind
+
+
 # The exchange writes a face value split a dozen ways and often without the word "from". These
 # shapes all appear in the live NSE feed and all used to parse without a ratio, which silently
 # became an adjustment factor of 1.0 and left prices unadjusted across the split.

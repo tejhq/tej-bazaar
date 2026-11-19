@@ -138,7 +138,7 @@ def test_parse_bse_record_joins_isin_when_map_provided():
         "Purpose": "Interim Dividend - Rs. - 12.0000",
         "RD_Date": "20 Jan 2024", "long_name": "HCL Technologies Ltd",
     }
-    a = parse_bse_record(rec, scrip_to_isin={"532281": "INE860A01027"})
+    [a] = parse_bse_record(rec, scrip_to_isin={"532281": "INE860A01027"})
     assert a.isin == "INE860A01027"
 
 
@@ -148,7 +148,7 @@ def test_parse_bse_record_isin_none_without_map():
         "Ex_date": "19 Jan 2024", "exdate": "20240119",
         "Purpose": "Interim Dividend - Rs. - 12.0000",
     }
-    a = parse_bse_record(rec)
+    [a] = parse_bse_record(rec)
     assert a.isin is None
 
 
@@ -158,7 +158,7 @@ def test_parse_bse_record_unknown_scrip_isin_none():
         "Ex_date": "19 Jan 2024", "exdate": "20240119",
         "Purpose": "Bonus 1:1",
     }
-    a = parse_bse_record(rec, scrip_to_isin={"532281": "INE860A01027"})
+    [a] = parse_bse_record(rec, scrip_to_isin={"532281": "INE860A01027"})
     assert a.isin is None
 
 
@@ -169,5 +169,5 @@ def test_parse_bse_record_str_scrip_code_works():
         "Ex_date": "19 Jan 2024", "exdate": "20240119",
         "Purpose": "Bonus 1:1",
     }
-    a = parse_bse_record(rec, scrip_to_isin={"532281": "INE860A01027"})
+    [a] = parse_bse_record(rec, scrip_to_isin={"532281": "INE860A01027"})
     assert a.isin == "INE860A01027"

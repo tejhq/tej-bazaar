@@ -256,6 +256,31 @@ def test_e2e_compute_and_back_adjust():
     )
 
 
+def test_a_bonus_and_its_dividend_on_one_ex_date_multiply():
+    # TCS 2018: one line, two rows. Both entitlements are fixed on the same record date, before the
+    # bonus shares exist, so the Rs 29 is per pre-bonus share and comes off the pre-bonus close.
+    from pipeline.actions import parse_nse_record
+
+    rec = {
+        "symbol": "TCS",
+        "series": "EQ",
+        "isin": "INE001",
+        "subject": "Bonus 1:1 /Dividend- Rs 29 Per Share",
+        "exDate": "31-May-2018",
+    }
+    actions = to_polars(parse_nse_record(rec))
+    prices = _prices(
+        [
+            ("INE001", date(2018, 5, 29), 3500.0),
+            ("INE001", date(2018, 5, 30), 3500.0),
+            ("INE001", date(2018, 5, 31), 1735.5),
+        ]
+    )
+    out = back_adjust(prices, compute_action_factors(actions, prices)).sort("date")
+    assert out["adj_factor_cumulative"].to_list() == pytest.approx([0.5 * 3471 / 3500] * 2 + [1.0])
+    assert out["adj_close"].to_list() == pytest.approx([1735.5] * 3)
+
+
 # --- resolve_isin_via_symbol_history -----------------------------------
 
 

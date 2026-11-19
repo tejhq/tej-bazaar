@@ -1,5 +1,6 @@
 import io
 import zipfile
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -770,6 +771,60 @@ def test_actions_reparse_writes_a_file_whose_only_change_fills_a_null(tmp_path: 
     assert r.exit_code == 0, r.stdout
     out = pl.read_parquet(adir / "nse_2022.parquet")
     assert (out["ratio_num"].to_list(), out["ratio_den"].to_list()) == ([1], [2])
+
+
+def test_actions_reparse_adds_the_dividend_of_a_bonus_line_once(tmp_path: Path):
+    from pipeline.actions import to_polars
+    from pipeline.actions.derive import DERIVED_NOTE
+
+    adir = tmp_path / "actions"
+    adir.mkdir()
+    bonus = CorporateAction(
+        "NSE",
+        "TCS",
+        "INE467B01029",
+        "TCS",
+        date(2018, 5, 31),
+        None,
+        "bonus",
+        ratio_num=1,
+        ratio_den=1,
+        raw_subject="Bonus 1:1 /Dividend- Rs 29 Per Share",
+    )
+    dividend = replace(bonus, type="dividend", ratio_num=None, ratio_den=None, cash_amount=29.0)
+    dup = CorporateAction(
+        "NSE",
+        "X",
+        "I2",
+        "X",
+        date(2018, 9, 19),
+        None,
+        "dividend",
+        cash_amount=1.5,
+        raw_subject="Annual General Meeting/Dividend Rs 1.50 Per Share",
+    )
+    derived = CorporateAction(
+        "NSE",
+        "Y",
+        None,
+        "Y",
+        date(2018, 9, 20),
+        None,
+        "split",
+        face_value_from=10.0,
+        face_value_to=1.0,
+        raw_subject=f"{DERIVED_NOTE}: 100.00 on 2018-09-19 to 10.00 on 2018-09-20",
+    )
+    no_subject = CorporateAction("NSE", "Z", "I3", "Z", date(2018, 9, 21), None, "split")
+    rest = [dup, dup, derived, no_subject, replace(no_subject, type="dividend")]
+    expected = to_polars([bonus, dividend, *rest, bonus, dividend])
+    to_polars([bonus, *rest, bonus]).write_parquet(adir / "nse_2018.parquet")
+    expected.write_parquet(adir / "nse_2019.parquet")
+    for _ in range(2):
+        r = runner.invoke(app, ["actions", "reparse", "--actions-dir", str(adir)])
+        assert r.exit_code == 0, r.stdout
+        for name in ("nse_2018.parquet", "nse_2019.parquet"):
+            assert pl.read_parquet(adir / name).equals(expected), name
 
 
 def _adjusted(tmp: Path, ex: str, sym: str, cliff: bool) -> None:

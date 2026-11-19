@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -95,7 +96,7 @@ def test_parse_nse_skips_govt_bond():
         "exDate": "01-Jan-2024", "recDate": "01-Jan-2024",
         "comp": "GOVT OF INDIA", "isin": "IN0020100031",
     }
-    assert parse_nse_record(govt) is None
+    assert parse_nse_record(govt) == []
 
 
 def test_parse_nse_dividend_amount():
@@ -105,8 +106,7 @@ def test_parse_nse_dividend_amount():
         "subject": "Interim Dividend - Rs 12 Per Share",
         "exDate": "19-Jan-2024", "recDate": "20-Jan-2024",
     }
-    a = parse_nse_record(rec)
-    assert a is not None
+    [a] = parse_nse_record(rec)
     assert a.exchange == "NSE"
     assert a.type == "dividend"
     assert a.cash_amount == 12.0
@@ -124,7 +124,7 @@ def test_parse_nse_dividend_re_prefix():
         "exDate": "04-Jan-2024", "recDate": "04-Jan-2024",
         "comp": "Akshar Spintex Limited", "isin": "INE256Z01017",
     }
-    a = parse_nse_record(rec)
+    [a] = parse_nse_record(rec)
     assert a.cash_amount == 0.01
 
 
@@ -134,7 +134,7 @@ def test_parse_nse_bonus_ratio():
         "exDate": "02-Jan-2024", "recDate": "02-Jan-2024",
         "comp": "Allcargo Logistics Limited", "isin": "INE418H01029",
     }
-    a = parse_nse_record(rec)
+    [a] = parse_nse_record(rec)
     assert a.type == "bonus"
     assert a.ratio_num == 3
     assert a.ratio_den == 1
@@ -147,7 +147,7 @@ def test_parse_nse_split_face_value():
         "exDate": "05-Jan-2024", "recDate": "05-Jan-2024",
         "comp": "Nestle India Limited", "isin": "INE239A01016",
     }
-    a = parse_nse_record(rec)
+    [a] = parse_nse_record(rec)
     assert a.type == "split"
     assert a.face_value_from == 10.0
     assert a.face_value_to == 1.0
@@ -160,7 +160,7 @@ def test_parse_nse_rights_ratio():
         "exDate": "10-Jan-2024", "recDate": "10-Jan-2024",
         "comp": "Grasim Industries Limited", "isin": "INE047A01013",
     }
-    a = parse_nse_record(rec)
+    [a] = parse_nse_record(rec)
     assert a.type == "rights"
     assert a.ratio_num == 6
     assert a.ratio_den == 179
@@ -172,7 +172,7 @@ def test_parse_nse_buyback_no_amount():
         "exDate": "17-Jan-2024", "recDate": "17-Jan-2024",
         "comp": "Dhampur Sugar Mills Limited", "isin": "INE041A01016",
     }
-    a = parse_nse_record(rec)
+    [a] = parse_nse_record(rec)
     assert a.type == "buyback"
     assert a.cash_amount is None
     assert a.ratio_num is None
@@ -184,17 +184,17 @@ def test_parse_nse_agm_keeps_record():
         "exDate": "03-Jan-2024", "recDate": "-",
         "comp": "SPICEJET LTD", "isin": "INE285B01017",
     }
-    a = parse_nse_record(rec)
+    [a] = parse_nse_record(rec)
     assert a.type == "agm"
     assert a.record_date is None  # "-" parses to None
 
 
-def test_parse_nse_invalid_date_returns_none():
+def test_parse_nse_invalid_date_returns_empty_list():
     rec = {
         "symbol": "X", "series": "EQ", "subject": "Bonus 1:1",
         "exDate": "", "recDate": "",
     }
-    assert parse_nse_record(rec) is None
+    assert parse_nse_record(rec) == []
 
 
 # --- BSE record parser --------------------------------------------------
@@ -208,8 +208,7 @@ def test_parse_bse_dividend_amount():
         "RD_Date": "20 Jan 2024",
         "long_name": "HCL Technologies Ltd",
     }
-    a = parse_bse_record(rec)
-    assert a is not None
+    [a] = parse_bse_record(rec)
     assert a.exchange == "BSE"
     assert a.type == "dividend"
     assert a.cash_amount == 12.0
@@ -226,7 +225,7 @@ def test_parse_bse_split_face_value():
         "RD_Date": "05 Jan 2024",
         "long_name": "Nestle India Ltd",
     }
-    a = parse_bse_record(rec)
+    [a] = parse_bse_record(rec)
     assert a.type == "split"
     assert a.face_value_from == 10.0
     assert a.face_value_to == 1.0
@@ -240,7 +239,7 @@ def test_parse_bse_bonus_high_ratio():
         "RD_Date": "06 Jan 2024",
         "long_name": "M Lakhamsi Industries Ltd",
     }
-    a = parse_bse_record(rec)
+    [a] = parse_bse_record(rec)
     assert a.type == "bonus"
     assert a.ratio_num == 1
     assert a.ratio_den == 50
@@ -255,7 +254,7 @@ def test_parse_bse_rights_no_ratio_in_text():
         "RD_Date": "02 Jan 2024",
         "long_name": "La Tim Metal & Industries Ltd",
     }
-    a = parse_bse_record(rec)
+    [a] = parse_bse_record(rec)
     assert a.type == "rights"
     assert a.ratio_num is None
     assert a.ratio_den is None
@@ -269,7 +268,7 @@ def test_parse_bse_invit_distribution_classified_as_dividend():
         "RD_Date": "13 Jan 2024",
         "long_name": "Energy Infrastructure Trust",
     }
-    a = parse_bse_record(rec)
+    [a] = parse_bse_record(rec)
     assert a.type == "dividend"
 
 
@@ -281,7 +280,7 @@ def test_parse_bse_spin_off_is_demerger():
         "RD_Date": "19 Apr 2024",
         "long_name": "Mahalaxmi Rubtech Ltd",
     }
-    a = parse_bse_record(rec)
+    [a] = parse_bse_record(rec)
     assert a.type == "demerger"
 
 
@@ -672,3 +671,139 @@ def test_dividend_cash_marker_glued_to_the_word_before(text, cash):
     from pipeline.actions.parse import dividend_cash
 
     assert dividend_cash(text) == cash
+
+
+# One line announcing a bonus, split or rights issue and a dividend. The first row
+# is the line's own action, as before; the second is the dividend, with cash from the dividend's
+# clauses only: not the face values, the rights premium or the bonus ratio.
+TWO_ACTION_LINES = [
+    # (text, the line's own row, the dividend's cash)
+    ("Bonus 1:1 /Dividend- Rs 29 Per Share", "bonus 1:1", 29.0),
+    ("Annual General Meeting/ Dividend - Rs 29.50/- Per Share And Bonus 1:1", "bonus 1:1", 29.5),
+    ("Annual General Meeting/Dividend - Rs 2.50 Per Share/Bonus 1:10 (Revised)", "bonus 1:10", 2.5),
+    ("Bonus 1:2/ Dividend - Rs 1.10 Per Share", "bonus 1:2", 1.1),
+    ("Bonus 2:3 And Final Dividend Rs.6/- Per Share", "bonus 2:3", 6.0),
+    ("Dividend Rs 2.50/- Per Share / Bonus 1 : 4", "bonus 1:4", 2.5),
+    (
+        "Final Dividend Rs.7.50 Per Share And Special Dividend Rs.7.50 Per Share/Bonus 1:1 (Purpose Revised)",
+        "bonus 1:1",
+        15.0,
+    ),
+    (
+        "Annual General Meeting/Dividend Rs.3/- Per Share/Scheme Of Arrangement - Bonus Debentures 1:1 (Purpose Revised)",
+        "bonus",
+        3.0,
+    ),
+    ("Fv Spl-Rs10tore1/Div-1.50", "split 10->1", 1.5),
+    ("Dividend Rs.6/- Per Share And Face Value Split From Rs.2/- To Re.1/-", "split 2->1", 6.0),
+    (
+        "Interim Div - Rs 6/- Per Share + Face Value Split (Sub-Division) - From Rs 10/- Per Share To Re 1/- Per Share",
+        "split 10->1",
+        6.0,
+    ),
+    (
+        "Annual General Meeting / Dividend - Rs 1.35/- Per Share / Face Value Split - From Rs 10/- Per Share To Rs 2/- Per Share",
+        "split 10->2",
+        1.35,
+    ),
+    ("Dividend Rs.1.80 Per Share And Rights 1:3 @ Premium Rs.30/- Per Share", "rights 1:3", 1.8),
+    (
+        "Rights 7:5@Premium Rs.55 Per Share/Annual General Meeting / Dividend Re.1/- Per Equity Share (Purpose Revised)",
+        "rights 7:5",
+        1.0,
+    ),
+    (
+        "Interim Dividend- Rs 3 Per Share / Rights 1:16 @ Premium Rs 554 Per Share",
+        "rights 1:16",
+        3.0,
+    ),
+    ("Dividend Re1/- Per Share + Rights Issue 5:6", "rights", 1.0),
+    ("Dividend - Re 0.70/- Per Share/ Right 26:151", "rights 26:151", 0.7),
+    # Variants of feed wording.
+    ("FvSpl-Rs10tore1/Div-1.50", "split 10->1", 1.5),
+    ("Dividend Rs 6/- Per Share / Face Value Split / From Rs 10/- To Re 1/-", "split 10->1", 6.0),
+    ("Dividend Rs 3 Per Share / Rights Issue 1:3 / Issue Price Rs.35/- Per Share", "rights", 3.0),
+    ("Rights 7:10 / @ Prm Rs 102/- & Final Div Rs.3/- Per Share", "rights 7:10", 3.0),
+    ("Final Div-7.50 And Special Dividend 7.50 And Bonus 1:1", "bonus 1:1", 15.0),
+    ("Rights 1:10 / @ Prem Rs 197/- Per Share / Dividend Rs 3/- Per Share", "rights 1:10", 3.0),
+    ("Rights - 2:3 / At Par Rs 10 Per Share / Dividend Rs 3/- Per Share", "rights", 3.0),
+    (
+        "Bonus 1:1 / Distribution Of XYZ Ltd Shares At Rs.10/- Per Share / Divided - Rs.3/-",
+        "bonus 1:1",
+        3.0,
+    ),
+]
+
+
+def _row(a):
+    ratio = f" {a.ratio_num}:{a.ratio_den}" if a.ratio_num is not None else ""
+    fv = f" {a.face_value_from:g}->{a.face_value_to:g}" if a.face_value_from is not None else ""
+    return a.type + ratio + fv
+
+
+@pytest.mark.parametrize("text,own,cash", TWO_ACTION_LINES)
+def test_a_line_with_a_dividend_alongside_gives_two_rows(text, own, cash):
+    rec = {
+        "symbol": "X",
+        "series": "EQ",
+        "isin": "INE001A01011",
+        "subject": text,
+        "exDate": "31-May-2018",
+    }
+    first, dividend = parse_nse_record(rec)
+    assert (_row(first), first.cash_amount) == (own, None)
+    # Same symbol, ISIN, ex date and text; a dividend with no ratio or face value.
+    bare = {"ratio_num": None, "ratio_den": None, "face_value_from": None, "face_value_to": None}
+    assert dividend == replace(first, type="dividend", cash_amount=cash, **bare)
+
+
+def test_bse_gives_the_dividend_row_too():
+    rec = {
+        "scrip_code": "532540",
+        "short_name": "TCS",
+        "long_name": "Tata Consultancy Services Ltd",
+        "Purpose": "Bonus 1:1 /Dividend- Rs 29 Per Share",
+        "exdate": "20180531",
+        "RD_Date": "31 May 2018",
+    }
+    own, dividend = parse_bse_record(rec, scrip_to_isin={"532540": "INE467B01029"})
+    assert (_row(own), own.cash_amount) == ("bonus 1:1", None)
+    assert own.isin == "INE467B01029"
+    assert own.company == "Tata Consultancy Services Ltd"
+    assert own.record_date == date(2018, 5, 31)
+    assert dividend == replace(
+        own, type="dividend", cash_amount=29.0, ratio_num=None, ratio_den=None
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # From the feed.
+        "Bonus 1:1",
+        "Bonus 1:1 / Face Value Split From 10/- To Face Value 2/-",
+        "Face Value Split (Sub-Division) - From Rs 10/- Per Share To Re 1/- Per Share",
+        "Rights 6:179 @ Premium Rs 1810/-",
+        "To Distribute Net Proceeds From The Sale Of Rights Entitlement",
+        "Interim Dividend - Rs 12 Per Share",
+        "Agm/Div-Rs.2/Rh2:9@Prm215",
+        # A missing amount, or text that mentions dividends without declaring one.
+        "Bonus 1:1 / Interim Dividend",
+        "Interim Dividend / Face Value Split / From Rs 10/- To Re 1/-",
+        "Rights 1:3 @ Premium Rs.30/- Per Share (Shares Rank Pari Passu For Dividend)",
+        "Face Value Split / From Rs 10 To Re 1 Per Sub Divided Equity Share",
+        "Bonus 1:1 / No Final Dividend / Increase In Authorised Share Capital From Rs 10 Crore To Rs 20 Crore",
+        "Rights 1:3 @ Premium Rs.30/- Per Share / Nil Dividend (Rs 0/- Per Share)",
+        "Bonus 1:1 / Distribution Of XYZ Ltd Shares At Rs.10/- Per Share",
+        "Face Value Split / Each Equity Share Divided From Rs.10/- Into Re.1/-",
+    ],
+)
+def test_a_line_with_one_action_gives_one_row(text):
+    rec = {
+        "symbol": "X",
+        "series": "EQ",
+        "isin": "INE001A01011",
+        "subject": text,
+        "exDate": "31-May-2018",
+    }
+    assert len(parse_nse_record(rec)) == 1

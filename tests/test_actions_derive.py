@@ -60,6 +60,20 @@ def test_a_nearby_demerger_is_never_overridden():
     assert derive_splits(jumps, acts) == []
 
 
+def test_a_step_with_an_action_on_its_date_is_never_derived():
+    # MANAPPURAM 2011-06-09: the 1:1 bonus the parser at 9d0845d left at factor 1.0 is a clean 2:1
+    # step. The audit no longer counts it as explained; derive still leaves it alone, even with no
+    # actions to search for neighbours.
+    prices = _prices("MANAPPURAM", [115.60, 115.60, 58.65, 58.65], start=date(2011, 6, 7))
+    assert len(derive_splits(find_jumps(prices))) == 1
+    actions = _actions([("MANAPPURAM", date(2011, 6, 9), "bonus")]).with_columns(
+        raw_subject=pl.lit("Bonus Shares In The Ratio Of 1:1")
+    )
+    jumps = find_jumps(prices, actions)
+    assert len(jumps) == 1 and not jumps[0].explained
+    assert derive_splits(jumps) == []
+
+
 def test_a_move_just_inside_the_threshold_is_not_touched():
     # Tata Motors fell 40% on its demerger; a fraction under the bar must stay out of scope.
     assert find_jumps(_prices("BORDERLINE", [660.75, 660.75, 396.45, 396.0])) == []

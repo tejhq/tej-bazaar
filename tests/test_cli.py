@@ -1,7 +1,7 @@
 import io
 import zipfile
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -833,8 +833,8 @@ def _adjusted(tmp: Path, ex: str, sym: str, cliff: bool) -> None:
     for i in range(6):
         d = date(2024, 1, 1 + i)
         px = 100.0 if not (cliff and i >= 3) else 10.0
-        rows.append({"date": d, "symbol": sym, "adj_close": px})
-    pl.DataFrame(rows).write_parquet(tmp / f"{ex}_2024.parquet")
+        rows.append({"date": d, "symbol": sym, "isin": None, "close": px, "adj_close": px})
+    pl.DataFrame(rows, schema_overrides={"isin": pl.Utf8}).write_parquet(tmp / f"{ex}_2024.parquet")
 
 
 # `--exchange both` used to glob "both_*.parquet", which matches nothing, so audit and derive
@@ -853,6 +853,36 @@ def test_actions_both_covers_each_exchange(tmp_path: Path, cmd: str):
     assert "no adjusted prices" not in result.stdout
     assert "NSE" in result.stdout and "BSE" in result.stdout
     assert "AAA" in result.stdout and "BBB" in result.stdout
+
+
+def _step(adj: Path, acts: Path, symbol: str, ex: date, kind: str, subject: str, closes: tuple):
+    """Write a year of adjusted prices stepping on `ex`, and one action on that date."""
+    name = f"nse_{ex.year}.parquet"
+    days = [ex + timedelta(days=i - 2) for i in range(4)]
+    px = [closes[0], closes[0], closes[1], closes[1]]
+    frame = {"date": days, "symbol": symbol, "isin": None, "close": px, "adj_close": px}
+    pl.DataFrame(frame, schema_overrides={"isin": pl.Utf8}).write_parquet(adj / name)
+    action = CorporateAction("NSE", symbol, None, "", ex, None, kind, raw_subject=subject)
+    pl.DataFrame([vars(action)], schema=ACTION_SCHEMA).write_parquet(acts / name)
+
+
+# B8: a jump on the date of a bonus the parser left at factor 1.0 was reported as explained, and
+# the command passed.
+def test_actions_audit_fails_on_a_parse_failure_and_not_on_a_demerger(tmp_path: Path):
+    adj, acts = tmp_path / "adj", tmp_path / "acts"
+    adj.mkdir()
+    acts.mkdir()
+    args = ["actions", "audit", "--adjusted-dir", str(adj), "--actions-dir", str(acts)]
+    _step(adj, acts, "SIEMENS", date(2025, 4, 7), "demerger", "Demerger", (4928.15, 2812.45))
+    demerger = runner.invoke(app, args)
+    assert demerger.exit_code == 0, demerger.stdout
+    _step(adj, acts, "INVENTURE", date(2012, 5, 22), "bonus", "Bonus - 3:1", (202.05, 47.55))
+    result = runner.invoke(app, [*args, "--threshold", "0.10"])
+    assert result.exit_code == 1, result.stdout
+    assert "jumps, not adjusted: 1" in demerger.stdout and "SIEMENS" in demerger.stdout
+    assert "10% (10% on a split or bonus ex date)" in result.stdout
+    assert "jumps, factor 1.0: 1" in result.stdout and "INVENTURE" in result.stdout
+    assert "jumps, not adjusted: 1" in result.stdout
 
 
 def _session(prices_dir: Path, ex: str, d: str) -> None:

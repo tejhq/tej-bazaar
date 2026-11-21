@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 import re
+from dataclasses import replace
 from datetime import date, datetime
 from typing import Any
 
@@ -121,6 +122,10 @@ _RE_AGM_AMOUNT = re.compile(
 )
 
 
+def _names_dividend(t: str) -> bool:
+    return "dividend" in t or "distribution" in t or bool(_RE_DIVIDEND_WORD.search(t))
+
+
 def _classify(text: str) -> ActionType:
     """Map free-text to ActionType. Order matters: price-impacting wins over AGM."""
     t = text.lower()
@@ -140,7 +145,7 @@ def _classify(text: str) -> ActionType:
         return "bonus"
     if re.search(r"\brights?\b", t):
         return "rights"
-    if "dividend" in t or "distribution" in t or _RE_DIVIDEND_WORD.search(t):
+    if _names_dividend(t):
         return "dividend"
     if "buy back" in t or "buyback" in t:
         return "buyback"
@@ -250,21 +255,84 @@ def dividend_cash(text: str) -> float | None:
     return round(sum(amounts), 4)
 
 
-def parse_nse_record(rec: dict[str, Any]) -> CorporateAction | None:
-    """Parse one NSE corporate-action JSON record. Returns None for non-equity."""
+# Where one line announcing two actions breaks between them: "Bonus 1:1 /Dividend- Rs 29 Per Share",
+# "Dividend Rs.6/- Per Share And Face Value Split From Rs.2/- To Re.1/-", "Interim Div - Rs 6/- Per
+# Share + Face Value Split". "/-" closes an amount.
+_RE_CLAUSE_BREAK = re.compile(r"(/(?!-)|\+|&|\band\b)", re.I)
+# A clause about the bonus, split or rights issue. Its face values ("Fv Spl-Rs10tore1") and premium
+# ("Rights 1:3 @ Premium Rs.30/-") are not cash.
+_RE_OTHER_ACTION = re.compile(
+    r"\bbon(?:us)?\b|split|splt|\bfv(?:\b|spl)|face\s+value|sub-?division|consolidat|"
+    r"\brights?\b|\b(?:prem(?:ium)?|prm|(?:issue|exercise)\s+price)\b|(?:@\s*|\bat\s+)par\b",
+    re.I,
+)
+# Mentions of dividends or divided shares that do not declare a cash payout.
+_RE_NON_DIVIDEND_PHRASE = re.compile(
+    r"\b(?:sub[\s-]+divided|divided\s+(?:into|from)|"
+    r"(?:(?:no|nil)(?:\s+(?:interim|final|special))?|pari\s+passu\s+for)\s+div(?:idends?)?|"
+    r"distribution\s+of\s+(?:(?!(?:cash|income|proceeds|dividends?)\b)[a-z][\w.'-]*\s+)*shares)\b",
+    re.I,
+)
+
+
+def _dividend_alongside(action_type: ActionType, text: str) -> float | None:
+    """Cash of a dividend that a bonus, split or rights line also declares.
+
+    "Bonus 1:1 /Dividend- Rs 29 Per Share" is a bonus and a Rs 29 dividend on one ex date. The cash is
+    read with the clauses about the other action left out, so "Fv Spl-Rs10tore1/Div-1.50" is 1.50, not
+    11.5. None when the line declares no dividend or states no amount for it.
+    """
+    if action_type not in ("bonus", "split", "rights"):
+        return None
+    kept = []
+    declares_dividend = False
+    for i, part in enumerate(_RE_CLAUSE_BREAK.split(text)):
+        if i % 2:
+            # The cash parser recognizes "&" as a break after a bare amount.
+            kept.append("&" if part.lower() == "and" else part)
+            continue
+        clause, mentions = _RE_NON_DIVIDEND_PHRASE.subn("", part)
+        if _names_dividend(clause.lower()):
+            declares_dividend = True
+        elif mentions or _RE_OTHER_ACTION.search(clause) or _RE_SPLIT_FACE.search(clause):
+            continue
+        kept.append(clause)
+    return dividend_cash("".join(kept)) if declares_dividend else None
+
+
+def _with_dividend(action: CorporateAction) -> list[CorporateAction]:
+    """The action, followed by a dividend row when its line also declares one."""
+    cash = _dividend_alongside(action.type, action.raw_subject)
+    if cash is None:
+        return [action]
+    dividend = replace(
+        action,
+        type="dividend",
+        ratio_num=None,
+        ratio_den=None,
+        cash_amount=cash,
+        face_value_from=None,
+        face_value_to=None,
+    )
+    return [action, dividend]
+
+
+def parse_nse_record(rec: dict[str, Any]) -> list[CorporateAction]:
+    """Parse one NSE corporate-action JSON record. Empty for non-equity; two rows when a bonus,
+    split or rights line also declares a dividend."""
     series = (rec.get("series") or "").strip().upper()
     if series in _NSE_NON_EQUITY_SERIES:
-        return None
+        return []
 
     subject = (rec.get("subject") or "").strip()
     ex = _parse_date(rec.get("exDate"))
     if ex is None:
-        return None
+        return []
 
     action_type = _classify(subject)
     rn, rd, cash, fv_from, fv_to = _extract_details(action_type, subject)
 
-    return CorporateAction(
+    action = CorporateAction(
         exchange="NSE",
         symbol=(rec.get("symbol") or "").strip(),
         isin=(rec.get("isin") or "").strip() or None,
@@ -279,13 +347,15 @@ def parse_nse_record(rec: dict[str, Any]) -> CorporateAction | None:
         face_value_to=fv_to,
         raw_subject=subject,
     )
+    return _with_dividend(action)
 
 
 def parse_bse_record(
     rec: dict[str, Any],
     scrip_to_isin: dict[str, str] | None = None,
-) -> CorporateAction | None:
-    """Parse one BSE corporate-action JSON record.
+) -> list[CorporateAction]:
+    """Parse one BSE corporate-action JSON record; two rows, as on NSE, when a bonus, split or
+    rights line also declares a dividend.
 
     BSE's corp-action feed lacks ISIN. When `scrip_to_isin` is supplied
     (built from the BSE active-equities master), ISIN is joined via
@@ -294,7 +364,7 @@ def parse_bse_record(
     purpose = (rec.get("Purpose") or "").strip()
     ex = _parse_date(rec.get("exdate")) or _parse_date(rec.get("Ex_date"))
     if ex is None:
-        return None
+        return []
 
     action_type = _classify(purpose)
     rn, rd, cash, fv_from, fv_to = _extract_details(action_type, purpose)
@@ -305,7 +375,7 @@ def parse_bse_record(
         if sc is not None:
             isin = scrip_to_isin.get(str(sc).strip())
 
-    return CorporateAction(
+    action = CorporateAction(
         exchange="BSE",
         symbol=(rec.get("short_name") or "").strip(),
         isin=isin,
@@ -320,6 +390,7 @@ def parse_bse_record(
         face_value_to=fv_to,
         raw_subject=purpose,
     )
+    return _with_dividend(action)
 
 
 def parse_actions(
@@ -328,8 +399,5 @@ def parse_actions(
     scrip_to_isin: dict[str, str] | None = None,
 ) -> list[CorporateAction]:
     if exchange.upper() == "NSE":
-        return [a for a in (parse_nse_record(r) for r in records) if a is not None]
-    return [
-        a for a in (parse_bse_record(r, scrip_to_isin) for r in records)
-        if a is not None
-    ]
+        return [a for r in records for a in parse_nse_record(r)]
+    return [a for r in records for a in parse_bse_record(r, scrip_to_isin)]

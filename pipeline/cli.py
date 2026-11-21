@@ -1025,11 +1025,14 @@ def actions_reparse(
     The classified fields are derived from the announcement text at fetch
     time. When the extractor improves (multi-part dividends, par value
     notes) the stored files are stale until re-fetched; this rewrites them
-    from the text they already carry. Idempotent, runs in the cron before
-    the adjust step.
+    from the text they already carry, adding the dividend row of a bonus,
+    split or rights line that also declares one. Idempotent, runs in the
+    cron before the adjust step.
     """
+    from collections import Counter
+
     from pipeline.actions.derive import is_derived
-    from pipeline.actions.parse import _classify, _extract_details
+    from pipeline.actions.parse import _classify, _dividend_alongside, _extract_details
 
     _banner()
     files = sorted(p for p in actions_dir.glob("*_*.parquet") if _year_from_actions_filename(p) is not None)
@@ -1040,37 +1043,46 @@ def actions_reparse(
     table.add_column("File", style="dim")
     table.add_column("Rows", justify="right")
     table.add_column("Changed", justify="right", style="green")
+    cols = ["type", "ratio_num", "ratio_den", "cash_amount", "face_value_from", "face_value_to"]
     for path in files:
         df = pl.read_parquet(path)
-        kinds, rn, rd, cash, fvf, fvt = [], [], [], [], [], []
+        # A bonus, split or rights line that also declares a dividend gives two rows, and a file holds
+        # both, or only the first if it was written before that. Rows that share every column but the
+        # parsed ones are one announcement, standing for as many records as it has rows of any one
+        # type (the feed repeats some records exactly). Each record's rows are written once, where its
+        # first row was, so a second run adds nothing.
+        record_cols = [c for c in df.columns if c not in cols]
+        seen: dict[tuple, Counter[str]] = {}
+        written: Counter[tuple] = Counter()
+        rows: list[dict] = []
         for row in df.iter_rows(named=True):
             t, subj = row["type"], row["raw_subject"]
             # Rows derived from a price step carry a note, not an announcement; reparsing their
             # text would classify them as "other" and throw away the ratio.
             if is_derived(subj):
-                kinds.append(t); rn.append(row["ratio_num"]); rd.append(row["ratio_den"])
-                cash.append(row["cash_amount"]); fvf.append(row["face_value_from"]); fvt.append(row["face_value_to"])
+                rows.append(row)
                 continue
+            if subj:
+                key = tuple(row[c] for c in record_cols)
+                counts = seen.setdefault(key, Counter())
+                counts[t] += 1
+                if counts[t] <= written[key]:
+                    continue
+                written[key] += 1
             # The type is derived from the text like every other field, so reclassify it too. A
             # face value split written "Fv Splt Frm Rs 10 To Re 1" was stored as "other" and its
             # factor silently stayed 1.0 however well the details parsed.
-            kind = _classify(subj or "") if subj else t
-            a, b, c, d, e = _extract_details(kind, subj or "")
-            kinds.append(kind); rn.append(a); rd.append(b); cash.append(c); fvf.append(d); fvt.append(e)
-        new = df.with_columns(
-            pl.Series("type", kinds, dtype=pl.Utf8),
-            pl.Series("ratio_num", rn, dtype=pl.Int64),
-            pl.Series("ratio_den", rd, dtype=pl.Int64),
-            pl.Series("cash_amount", cash, dtype=pl.Float64),
-            pl.Series("face_value_from", fvf, dtype=pl.Float64),
-            pl.Series("face_value_to", fvt, dtype=pl.Float64),
-        )
-        cols = ["type", "ratio_num", "ratio_den", "cash_amount", "face_value_from", "face_value_to"]
-        # ne_missing, not !=: != gives null when either side is None, the sum counted that as no
-        # change, and a file whose only changes filled or cleared a None was never rewritten.
-        changed = int(
-            pl.select(pl.any_horizontal([new[c].ne_missing(df[c]) for c in cols])).to_series().sum()
-        )
+            kind = _classify(subj) if subj else t
+            rows.append({**row, **dict(zip(cols, (kind, *_extract_details(kind, subj or ""))))})
+            cash = _dividend_alongside(kind, subj or "")
+            if cash is not None:
+                rows.append({**row, **dict(zip(cols, ("dividend", None, None, cash, None, None)))})
+        new = pl.DataFrame(rows, schema=df.schema)
+        # Rows rewritten, added or dropped. Compared as whole rows, so a None filled with a value
+        # counts: != gave null for it, and a file whose only changes were of that kind was never
+        # rewritten.
+        old_rows, new_rows = Counter(df.rows()), Counter(new.rows())
+        changed = max(sum((new_rows - old_rows).values()), sum((old_rows - new_rows).values()))
         if changed:
             new.write_parquet(path)
         table.add_row(path.name, str(df.height), str(changed))

@@ -94,6 +94,7 @@ class Jump:
     ratio: float
     cause: str
     actions: tuple[DateAction, ...] = ()
+    raw_ratio: float | None = None
 
     @property
     def explained(self) -> bool:
@@ -171,12 +172,13 @@ def find_jumps(
             if row["isin"]:
                 on.setdefault(("isin", row["isin"], row["ex_date"]), []).append(i)
     out: list[Jump] = []
-    for sym, d, close, prev_close, prev_date, prev_raw, isin_now, isin_before, ratio in df.select(
+    for sym, d, close, prev_close, prev_date, raw_now, prev_raw, isin_now, isin_before, ratio in df.select(
         "symbol",
         "date",
         "adj_close",
         "prev_close",
         "prev_date",
+        "raw",
         "prev_raw",
         "isin",
         "prev_isin",
@@ -205,6 +207,7 @@ def find_jumps(
                 ratio=ratio,
                 cause=_cause(on_date),
                 actions=on_date,
+                raw_ratio=raw_now / prev_raw if raw_now and prev_raw else None,
             )
         )
     return out

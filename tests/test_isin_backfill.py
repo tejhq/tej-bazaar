@@ -56,3 +56,9 @@ def test_symbol_with_isin_before_the_cutover_is_anchored():
     ]
     a = isin_anchors(pl.DataFrame(rows, schema=["date", "symbol", "isin"], orient="row"))
     assert a.to_dicts() == [{"symbol": "AAA", "isin": "INAAA"}, {"symbol": "THEMISMED", "isin": "INE083B01016"}]
+
+
+def test_symbol_anchor_needs_no_market_wide_cutover():
+    rows = [(date(2010, 1, 4), "A", "INA"), (date(2011, 6, 20), "T", None), (date(2011, 6, 22), "T", "INT")]
+    a = isin_anchors(pl.DataFrame(rows, schema=["date", "symbol", "isin"], orient="row"))
+    assert a.to_dicts() == [{"symbol": "T", "isin": "INT"}]

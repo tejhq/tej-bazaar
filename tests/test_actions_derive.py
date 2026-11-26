@@ -131,3 +131,38 @@ def test_a_symbol_with_a_stream_of_steps_is_dropped_entirely():
     # Four clean 10:1 steps from one name is an oscillating series, not four splits.
     closes = [1000.0, 100.0, 1000.0, 100.0, 1000.0, 100.0, 1000.0, 100.0]
     assert derive_splits(find_jumps(_prices("BOUNCY", closes))) == []
+
+
+def test_a_step_only_in_adj_close_is_not_derived():
+    # THEMISMED 2011-06-22: adj_close fell 10x because the earlier bars had no ISIN; the traded price did not move.
+    p = pl.DataFrame({
+        "date": [date(2011, 6, 17), date(2011, 6, 20), date(2011, 6, 22), date(2011, 6, 24)],
+        "symbol": ["THEMISMED"] * 4,
+        "close": [163.7, 160.1, 159.05, 162.15],
+        "adj_close": [163.7, 160.1, 15.13, 15.43],
+    })
+    assert derive_splits(find_jumps(p)) == []
+
+
+def test_drop_unbacked_removes_only_derived_rows_the_raw_close_contradicts():
+    from pipeline.actions.derive import drop_unbacked
+
+    def row(sym, d, subject, fv=(10.0, 1.0)):
+        return {
+            "exchange": "NSE", "symbol": sym, "isin": None, "company": sym, "ex_date": d, "record_date": None,
+            "type": "split", "ratio_num": None, "ratio_den": None, "cash_amount": None,
+            "face_value_from": fv[0], "face_value_to": fv[1], "raw_subject": subject,
+        }
+
+    actions = pl.DataFrame([
+        row("THEMISMED", date(2011, 6, 22), f"{DERIVED_NOTE}: 160.10 on 2011-06-20 to 15.13 on 2011-06-22"),
+        row("TATATEA", date(2010, 6, 30), f"{DERIVED_NOTE}: 1,194.25 on 2010-06-29 to 121.55 on 2010-06-30"),
+        row("THEMISMED", date(2023, 10, 10), "Face Value Split (Sub-Division) - From Rs 10/- Per Share To Re 1/- Per Share"),
+    ], schema=ACTION_SCHEMA)
+    prices = pl.DataFrame({
+        "symbol": ["THEMISMED", "THEMISMED", "TATATEA", "TATATEA", "THEMISMED", "THEMISMED"],
+        "date": [date(2011, 6, 20), date(2011, 6, 22), date(2010, 6, 29), date(2010, 6, 30), date(2023, 10, 9), date(2023, 10, 10)],
+        "close": [160.1, 159.05, 1194.25, 121.55, 1500.0, 1600.0],
+    })
+    kept = drop_unbacked(actions, prices)
+    assert sorted(zip(kept["symbol"], kept["ex_date"])) == [("TATATEA", date(2010, 6, 30)), ("THEMISMED", date(2023, 10, 10))]

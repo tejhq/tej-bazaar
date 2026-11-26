@@ -35,10 +35,11 @@ def isin_anchors(prices: pl.DataFrame) -> pl.DataFrame:
     missing = prices.filter(pl.col("isin").is_null() | (pl.col("isin") == ""))
     if has.is_empty() or missing.is_empty():
         return pl.DataFrame(schema={"symbol": pl.Utf8, "isin": pl.Utf8})
+    early = _early_anchors(has, missing)
     first_isin_day = has["date"].min()
     last_null_day = missing.filter(pl.col("date") < first_isin_day)["date"].max()
     if last_null_day is None:
-        return pl.DataFrame(schema={"symbol": pl.Utf8, "isin": pl.Utf8})
+        return early.sort("symbol")
     after = (
         has.filter(pl.col("date") == first_isin_day)
         .sort(["symbol", "isin"])
@@ -47,7 +48,7 @@ def isin_anchors(prices: pl.DataFrame) -> pl.DataFrame:
     )
     before = missing.filter(pl.col("date") == last_null_day).select("symbol").unique()
     cutover = after.join(before, on="symbol", how="inner")
-    return pl.concat([cutover, _early_anchors(has, missing).join(cutover, on="symbol", how="anti")]).sort("symbol")
+    return pl.concat([cutover, early.join(cutover, on="symbol", how="anti")]).sort("symbol")
 
 
 def _early_anchors(has: pl.DataFrame, missing: pl.DataFrame) -> pl.DataFrame:

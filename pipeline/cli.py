@@ -1111,7 +1111,7 @@ def actions_derive(
     is never overridden. Derived rows say so in `raw_subject`. Run `actions adjust` afterwards.
     """
     from pipeline.actions.audit import find_jumps
-    from pipeline.actions.derive import DERIVED_NOTE, derive_splits, merge_derived
+    from pipeline.actions.derive import DERIVED_NOTE, derive_splits, drop_unbacked, merge_derived
 
     _banner()
     if clear:
@@ -1131,6 +1131,14 @@ def actions_derive(
         if adjusted is None:
             console.print(f"[yellow]no {ex} adjusted prices under {adjusted_dir}[/yellow]")
             continue
+        if write and "close" in adjusted.columns:
+            for path in sorted(actions_dir.glob(f"{ex.lower()}_*.parquet")):
+                df = pl.read_parquet(path)
+                keep = drop_unbacked(df, adjusted)
+                if keep.height != df.height:
+                    keep.write_parquet(path)
+                    console.print(f"  {path.name}: dropped {df.height - keep.height} derived rows the raw close does not show")
+            _, actions = _load_adjusted_and_actions(ex, adjusted_dir, actions_dir)
         jumps = find_jumps(adjusted, actions, threshold)
         derived = derive_splits(jumps, actions)
         unexplained = sum(1 for j in jumps if not j.actions)

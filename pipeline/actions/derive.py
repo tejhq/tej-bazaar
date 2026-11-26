@@ -103,6 +103,9 @@ def derive_splits(
         ratio = _clean_ratio(j.ratio)
         if ratio is None:
             continue
+        # A split moves the traded price too. A step only in adj_close is an adjustment artefact.
+        if j.raw_ratio is not None and _clean_ratio(j.raw_ratio) != ratio:
+            continue
         # A forward split multiplies the unit count, so the face value falls by the same ratio.
         fv_from, fv_to = (ratio, 1.0) if j.ratio < 1 else (1.0, ratio)
         out.append(
@@ -163,8 +166,39 @@ def merge_derived(existing: pl.DataFrame, derived: list[CorporateAction]) -> pl.
     return pl.concat([keep, rows]).sort(["symbol", "ex_date"])
 
 
+def drop_unbacked(actions: pl.DataFrame, prices: pl.DataFrame) -> pl.DataFrame:
+    """Remove derived rows whose split the raw close does not show across the ex date.
+
+    `prices` has date, symbol and close. Rows whose symbol has no bar on one side are kept.
+    """
+    derived = actions.filter(pl.col("raw_subject").str.starts_with(DERIVED_NOTE))
+    if derived.is_empty() or prices.is_empty():
+        return actions
+    p = prices.select("symbol", "date", "close").drop_nulls().filter(pl.col("close") > 0).sort("symbol", "date")
+    keys = derived.select("symbol", "ex_date", "face_value_from", "face_value_to").sort("symbol", "ex_date")
+    before = keys.with_columns(_k=pl.col("ex_date") - pl.duration(days=1)).join_asof(
+        p.rename({"date": "_k", "close": "_before"}), on="_k", by="symbol", strategy="backward"
+    )
+    after = keys.join_asof(p.rename({"date": "ex_date", "close": "_after"}), on="ex_date", by="symbol", strategy="forward")
+    bad = []
+    for b, a in zip(before.iter_rows(named=True), after.iter_rows(named=True), strict=True):
+        if b["_before"] is None or a["_after"] is None or not b["face_value_from"]:
+            continue
+        want = _clean_ratio(b["face_value_to"] / b["face_value_from"])
+        if _clean_ratio(a["_after"] / b["_before"]) != want:
+            bad.append((b["symbol"], b["ex_date"]))
+    if not bad:
+        return actions
+    drop = pl.DataFrame(bad, schema={"symbol": pl.Utf8, "ex_date": pl.Date}, orient="row").with_columns(_bad=pl.lit(True))
+    return (
+        actions.join(drop, on=["symbol", "ex_date"], how="left")
+        .filter(~(pl.col("_bad").fill_null(False) & pl.col("raw_subject").str.starts_with(DERIVED_NOTE)))
+        .drop("_bad")
+    )
+
+
 def is_derived(raw_subject: str | None) -> bool:
     return bool(raw_subject) and raw_subject.startswith(DERIVED_NOTE)
 
 
-__all__ = ["derive_splits", "merge_derived", "is_derived", "DERIVED_NOTE"]
+__all__ = ["derive_splits", "merge_derived", "drop_unbacked", "is_derived", "DERIVED_NOTE"]

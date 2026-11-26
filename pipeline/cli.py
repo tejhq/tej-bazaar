@@ -201,15 +201,10 @@ def _load_adjusted_and_actions(
     prices = sorted(adjusted_dir.glob(f"{ex}_*.parquet"))
     if not prices:
         return None, None
-    adjusted = pl.concat([pl.read_parquet(p, columns=["date", "symbol", "adj_close"]) for p in prices])
+    cols = ["date", "symbol", "isin", "close", "adj_close"]
+    adjusted = pl.concat([pl.read_parquet(p, columns=cols) for p in prices])
     acts = sorted(actions_dir.glob(f"{ex}_*.parquet"))
-    actions = (
-        pl.concat(
-            [pl.read_parquet(p, columns=["symbol", "ex_date", "type", "raw_subject"]) for p in acts]
-        )
-        if acts
-        else None
-    )
+    actions = pl.concat([pl.read_parquet(p) for p in acts]) if acts else None
     return adjusted, actions
 
 
@@ -1132,15 +1127,13 @@ def actions_derive(
         return
     wrote = False
     for ex in _exchanges(exchange):
-        adjusted, _ = _load_adjusted_and_actions(ex, adjusted_dir, actions_dir)
+        adjusted, actions = _load_adjusted_and_actions(ex, adjusted_dir, actions_dir)
         if adjusted is None:
             console.print(f"[yellow]no {ex} adjusted prices under {adjusted_dir}[/yellow]")
             continue
-        act_paths = sorted(actions_dir.glob(f"{ex.lower()}_*.parquet"))
-        actions = pl.concat([pl.read_parquet(p) for p in act_paths]) if act_paths else None
         jumps = find_jumps(adjusted, actions, threshold)
         derived = derive_splits(jumps, actions)
-        unexplained = sum(1 for j in jumps if not j.explained)
+        unexplained = sum(1 for j in jumps if not j.actions)
         console.print(
             f"{ex}: {unexplained} unexplained steps, [green]{len(derived)} derived[/green] across "
             f"{len({a.symbol for a in derived})} symbols; {unexplained - len(derived)} left for review"
@@ -1188,16 +1181,27 @@ def actions_audit(
     threshold: Annotated[
         float, typer.Option("--threshold", help="One day move that counts as a jump")
     ] = 0.40,
-    limit: Annotated[int, typer.Option("--limit", help="Rows to print")] = 40,
+    split_threshold: Annotated[
+        float,
+        typer.Option(
+            "--split-threshold",
+            min=0.0,
+            help="One day move that counts as a jump on a split or bonus ex date, if lower",
+        ),
+    ] = 0.20,
+    limit: Annotated[int, typer.Option("--limit", help="Rows to print for each cause")] = 40,
 ) -> None:
-    """Report adjusted series that still jump, and whether an action explains each one.
+    """Report adjusted series that still jump, and what each jump lands on.
 
-    A correctly adjusted series has no cliffs; circuit bands cap a real one day move well under
-    40%. Anything larger is an action the pipeline did not apply. Unexplained rows are the ones to
-    chase: a split whose ratio never parsed, a split typed as something else, or an action the
-    exchange feed never carried, which is the usual case for ETF unit splits.
+    Each jump gets a cause from the actions on its date. Factor 1.0 means a split, bonus or dividend
+    on the date gets a factor of 1.0. Residual means there are actions of those types, all their
+    computed factors differ from 1.0, and the step remains. No action means nothing matched, as is
+    usual for ETF unit splits. Not adjusted covers demergers, schemes of arrangement, rights issues
+    and similar events left unadjusted by design. Split and bonus dates use the lower of
+    `--threshold` and `--split-threshold`, since a missed 1:2 bonus is a 33% step. Exits 1 when any
+    jump has one of the first three causes.
     """
-    from pipeline.actions.audit import find_jumps
+    from pipeline.actions.audit import CAUSES, NOT_ADJUSTED, find_jumps
 
     _banner()
     found = 0
@@ -1206,19 +1210,35 @@ def actions_audit(
         if adjusted is None:
             console.print(f"[yellow]no {ex} adjusted prices under {adjusted_dir}[/yellow]")
             continue
-        jumps = find_jumps(adjusted, actions, threshold)
-        unexplained = [j for j in jumps if not j.explained]
-        found += len(unexplained)
+        jumps = find_jumps(adjusted, actions, threshold, split_threshold=split_threshold)
+        found += sum(not j.explained for j in jumps)
+        by_cause = {c: [j for j in jumps if j.cause == c] for c in CAUSES}
         console.print(
-            f"{ex}: {adjusted.height:,} adjusted bars, {len(jumps)} jumps beyond {threshold:.0%}, "
-            f"[red]{len(unexplained)} unexplained[/red] across {len({j.symbol for j in unexplained})} symbols"
+            f"{ex}: {adjusted.height:,} adjusted bars, {len(jumps)} jumps beyond {threshold:.0%} "
+            f"({min(threshold, split_threshold):.0%} on a split or bonus ex date): "
+            + ", ".join(f"{len(js)} {c}" for c, js in by_cause.items())
         )
-        table = Table(title=f"{ex} unexplained jumps", border_style="red")
-        for col in ("Symbol", "Previous", "Close", "Date", "Close", "Implied"):
-            table.add_column(col, justify="right" if "Close" in col else "left")
-        for j in sorted(unexplained, key=lambda j: j.date, reverse=True)[:limit]:
-            table.add_row(j.symbol, str(j.prev_date), f"{j.prev_close:,.2f}", str(j.date), f"{j.close:,.2f}", j.implied)
-        console.print(table)
+        for cause, js in by_cause.items():
+            if not js:
+                continue
+            table = Table(
+                title=f"{ex} jumps, {cause}: {len(js)} across {len({j.symbol for j in js})} symbols",
+                border_style="dim" if cause == NOT_ADJUSTED else "red",
+            )
+            for col in ("Symbol", "Previous", "Close", "Date", "Close", "Implied", "Actions"):
+                table.add_column(col, justify="right" if "Close" in col else "left")
+            for j in sorted(js, key=lambda j: j.date, reverse=True)[:limit]:
+                acts = "; ".join(f"{a.type} x{a.factor:.3f}: {a.raw_subject}" for a in j.actions)
+                table.add_row(
+                    j.symbol,
+                    str(j.prev_date),
+                    f"{j.prev_close:,.2f}",
+                    str(j.date),
+                    f"{j.close:,.2f}",
+                    j.implied,
+                    Text(acts),
+                )
+            console.print(table)
     if found:
         raise typer.Exit(1)
 

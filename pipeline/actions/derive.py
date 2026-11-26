@@ -91,7 +91,8 @@ def derive_splits(
             nearby.setdefault(sym, []).append(ex)
     out: list[CorporateAction] = []
     for j in jumps:
-        if j.explained or j.prev_close <= 0 or j.close <= 0:
+        # Only a step with nothing announced on its date, whatever the audit makes of it.
+        if j.actions or j.prev_close <= 0 or j.close <= 0:
             continue
         if j.symbol.upper().endswith(ENTITLEMENT_SUFFIXES):
             continue

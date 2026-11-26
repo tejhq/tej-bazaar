@@ -368,6 +368,25 @@ def test_actions_adjust_writes_adjusted_parquet(tmp_path: Path):
     assert adjusted["adj_close"].to_list() == pytest.approx([100.0, 100.0, 110.0])
 
 
+def test_actions_adjust_applies_a_derived_split_to_isin_less_bars(tmp_path: Path):
+    # TATATEA 2010: no ISIN on any bar, and the derived 10:1 split has none either.
+    prices_dir, actions_dir, out_dir = tmp_path / "out", tmp_path / "actions", tmp_path / "adjusted"
+    _write_prices_parquet(prices_dir, "NSE", 2010, [
+        (None, date(2010, 6, 29), "X", 1194.25),
+        (None, date(2010, 6, 30), "X", 121.55),
+        ("INE999", date(2010, 6, 29), "Y", 50.0),
+    ])
+    _write_actions_parquet(actions_dir, "NSE", 2010, [date(2010, 6, 30)],
+                           [{"type": "split", "fv_from": 10.0, "fv_to": 1.0, "isin": None}])
+    result = runner.invoke(app, ["actions", "adjust", "--year", "2010", "--exchange", "NSE",
+                                 "--prices-dir", str(prices_dir), "--actions-dir", str(actions_dir),
+                                 "--out-dir", str(out_dir)])
+    assert result.exit_code == 0, result.stdout
+    out = pl.read_parquet(out_dir / "nse_2010.parquet").sort(["symbol", "date"])
+    assert out["adj_factor_cumulative"].to_list() == pytest.approx([0.1, 1.0, 1.0])
+    assert out["isin"].to_list() == [None, None, "INE999"]
+
+
 def test_actions_adjust_skips_missing_year(tmp_path: Path):
     # No prices written for 2024; should skip cleanly
     result = runner.invoke(

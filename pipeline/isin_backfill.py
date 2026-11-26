@@ -17,6 +17,10 @@ from __future__ import annotations
 
 import polars as pl
 
+# A symbol's last ISIN-less session and its first session with an ISIN this close together are one
+# instrument. Some 2011 files already carry ISINs for part of the market, before the cutover.
+MAX_GAP_DAYS = 7
+
 
 def isin_anchors(prices: pl.DataFrame) -> pl.DataFrame:
     """Return ``(symbol, isin)`` for symbols continuous across the cutover.
@@ -42,7 +46,24 @@ def isin_anchors(prices: pl.DataFrame) -> pl.DataFrame:
         .select("symbol", "isin")
     )
     before = missing.filter(pl.col("date") == last_null_day).select("symbol").unique()
-    return after.join(before, on="symbol", how="inner").sort("symbol")
+    cutover = after.join(before, on="symbol", how="inner")
+    return pl.concat([cutover, _early_anchors(has, missing).join(cutover, on="symbol", how="anti")]).sort("symbol")
+
+
+def _early_anchors(has: pl.DataFrame, missing: pl.DataFrame) -> pl.DataFrame:
+    """Symbols whose ISIN-less run ends within ``MAX_GAP_DAYS`` of their first ISIN session."""
+    last_null = missing.group_by("symbol").agg(pl.col("date").max().alias("_last_null"))
+    first = (
+        has.sort(["symbol", "date", "isin"])
+        .group_by("symbol", maintain_order=True)
+        .agg(pl.col("date").first().alias("_first"), pl.col("isin").first())
+    )
+    gap = (pl.col("_first") - pl.col("_last_null")).dt.total_days()
+    return (
+        first.join(last_null, on="symbol", how="inner")
+        .filter((gap > 0) & (gap <= MAX_GAP_DAYS))
+        .select("symbol", "isin")
+    )
 
 
 def apply_isin_anchors(prices: pl.DataFrame, anchors: pl.DataFrame) -> pl.DataFrame:

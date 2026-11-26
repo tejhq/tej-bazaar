@@ -1413,8 +1413,15 @@ def _adjust_one_year(
 
     if chain is None:
         chain = pl.DataFrame(schema={"isin": pl.Utf8, "chain_isin": pl.Utf8})
-    factors = compute_action_factors(remap_isin(actions, chain).drop("_isin_raw"), remap_isin(lookup, chain))
-    adjusted = restore_isin(back_adjust(remap_isin(prices, chain), factors))
+    # Rows still without an ISIN (2010 and 2011 symbols that never reach the cutover, and derived
+    # splits on them) are keyed by symbol, so they are adjusted as their own series.
+    def keyed(df: pl.DataFrame) -> pl.DataFrame:
+        return remap_isin(df, chain).with_columns(
+            isin=pl.coalesce("isin", pl.concat_str([pl.lit("sym:"), pl.col("symbol")]))
+        )
+
+    factors = compute_action_factors(keyed(actions).drop("_isin_raw"), keyed(lookup))
+    adjusted = restore_isin(back_adjust(keyed(prices), factors))
     out_path = out_dir / f"{ex.lower()}_{year}.parquet"
     adjusted.write_parquet(out_path)
     summary.add_row(ex, str(year), str(prices.height), str(actions.height),

@@ -44,3 +44,15 @@ def test_no_cutover_means_no_anchors():
 def test_series_key_uses_symbol_when_isin_missing():
     f = pl.DataFrame({"symbol": ["A", "B"], "isin": [None, "X"]})
     assert f.with_columns(series_key().alias("k"))["k"].to_list() == ["sym:A", "X"]
+
+
+def test_symbol_with_isin_before_the_cutover_is_anchored():
+    # THEMISMED: no ISIN to 2011-06-20, then INE083B01016 from 2011-06-22, months before the cutover.
+    rows = [
+        (date(2011, 6, 17), "THEMISMED", None), (date(2011, 6, 20), "THEMISMED", None),
+        (date(2011, 6, 22), "THEMISMED", "INE083B01016"), (date(2011, 12, 30), "AAA", None),
+        (date(2012, 1, 2), "AAA", "INAAA"),
+        (date(2011, 3, 1), "LATE", None), (date(2011, 9, 1), "LATE", "INLATE"),
+    ]
+    a = isin_anchors(pl.DataFrame(rows, schema=["date", "symbol", "isin"], orient="row"))
+    assert a.to_dicts() == [{"symbol": "AAA", "isin": "INAAA"}, {"symbol": "THEMISMED", "isin": "INE083B01016"}]

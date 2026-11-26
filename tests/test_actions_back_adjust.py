@@ -407,3 +407,15 @@ def test_resolve_isin_empty_actions_returns_unchanged():
     prices = _prices_full([("X", "INEX", date(2024, 1, 1))])
     resolved = resolve_isin_via_symbol_history(actions, prices)
     assert resolved.height == 0
+
+
+def test_an_exact_duplicate_dividend_row_counts_once():
+    div = CorporateAction(
+        exchange="NSE", symbol="UCAL", isin="INE139B01016", company="UCAL", ex_date=date(2018, 9, 19),
+        record_date=None, type="dividend", ratio_num=None, ratio_den=None, cash_amount=10.0,
+        face_value_from=None, face_value_to=None, raw_subject="Annual General Meeting/Dividend - Rs 10 Per Share",
+    )
+    prices = _prices([("INE139B01016", date(2018, 9, 18), 244.55), ("INE139B01016", date(2018, 9, 19), 235.0)])
+    f = compute_action_factors(to_polars([div, div]), prices)
+    assert f.height == 1
+    assert f["factor"][0] == pytest.approx((244.55 - 10) / 244.55)

@@ -46,8 +46,8 @@ def compute_action_factors(
             schema={"isin": pl.Utf8, "ex_date": pl.Date, "factor": pl.Float64}
         )
 
-    # Drop ISIN-less rows: no join key.
-    a = actions.filter(pl.col("isin").is_not_null())
+    # Drop ISIN-less rows: no join key. The feed sometimes repeats a row exactly; it is one action.
+    a = actions.filter(pl.col("isin").is_not_null()).unique(maintain_order=True)
     if a.height == 0:
         return pl.DataFrame(
             schema={"isin": pl.Utf8, "ex_date": pl.Date, "factor": pl.Float64}
